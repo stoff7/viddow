@@ -9,6 +9,7 @@ from pathlib import Path
 import download
 from contracts import download_options
 from jobs import JobManager
+from inspector import Inspector
 
 
 def settings_from(value):
@@ -34,11 +35,13 @@ class Session:
         self.manager = manager_factory(workers=workers, folder=folder)
         self.send = send
         self.id = uuid.uuid4().hex
+        self.inspector = Inspector()
 
     def state(self):
         return {"type": "state", "session": self.id, "jobs": self.manager.snapshots(),
                 "settings": {"workers": self.manager.workers, "output_dir": self.manager.folder},
-                "tools": {"yt_dlp": bool(shutil.which("yt-dlp")), "ffmpeg": bool(shutil.which("ffmpeg"))}}
+                "tools": {"yt_dlp": bool(shutil.which("yt-dlp")), "ffmpeg": bool(shutil.which("ffmpeg"))},
+                "analysis": self.inspector.snapshot()}
 
     def handle(self, message):
         request_id = message.get("request_id")
@@ -48,8 +51,21 @@ class Session:
             command = message.get("command")
             result = {}
             if command == "download":
-                urls, options = download_options(message)
+                if message.get("analysis_id") is not None:
+                    urls, options = self.inspector.selection(message["analysis_id"], message.get("format_ids"))
+                else:
+                    urls, options = download_options(message)
                 result = {"ids": self.manager.add(urls, **options)}
+            elif command == "inspect":
+                urls, options = download_options(message)
+                if len(urls) != 1:
+                    raise ValueError("Для анализа выберите один адрес")
+                result = self.inspector.start(urls[0], **options)
+            elif command == "inspect_cancel":
+                identifier = message.get("analysis_id")
+                if not isinstance(identifier, str):
+                    raise ValueError("Нужен ID анализа")
+                self.inspector.stop(identifier)
             elif command in ("cancel", "retry", "reveal"):
                 job_id = message.get("id")
                 if type(job_id) is not int:
@@ -102,4 +118,8 @@ class Session:
         finally:
             stopped.set()
             reporter.join()
-            self.manager.close()
+            self.inspector.stop()
+            try:
+                self.manager.close()
+            finally:
+                self.inspector.close()

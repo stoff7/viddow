@@ -39,6 +39,21 @@ h1 { font-size:17px; line-height:1.4; font-weight:600; margin:0; overflow-wrap:a
 #page>span { font-size:19px; line-height:1; }
 .page-note { font-size:10px; color:var(--muted); margin:9px 0 0; line-height:1.65; }
 .link-form { margin:19px 0 25px; }
+.inspect-page { margin:10px 0 0; }
+#inspectLink { margin-top:9px; }
+.analysis-card { border:1px solid var(--line); border-radius:12px; background:var(--surface); padding:15px; margin:0 0 24px; }
+#analysisSource { overflow-wrap:anywhere; }
+#analysisStatus { font-size:11px; overflow-wrap:anywhere; }
+#analysisStatus.error { color:var(--danger); }
+#videoThumbnail { width:100%; max-height:160px; object-fit:contain; border-radius:7px; margin-bottom:12px; }
+#videoTitle { overflow-wrap:anywhere; }
+#videoFormat { margin:0 0 12px; }
+#audioChoices { border:1px solid var(--line); border-radius:7px; padding:9px; margin:0 0 12px; min-width:0; }
+#audioChoices legend { font-size:11px; padding:0 4px; }
+.audio-option { display:flex; gap:8px; align-items:flex-start; overflow-wrap:anywhere; font-size:11px; font-weight:400; }
+.audio-option input { width:14px; flex:0 0 14px; margin-top:2px; }
+.analysis-note { margin:13px 0 0; }
+.job-format { font-size:10px; color:var(--muted); margin-top:4px; overflow-wrap:anywhere; }
 label { display:block; font-size:11px; font-weight:550; margin-bottom:7px; }
 input,select { width:100%; min-width:0; background:var(--surface); border:1px solid var(--line); border-radius:7px; padding:10px 11px; font-size:12px; }
 input::placeholder { color:var(--muted); }

@@ -30,7 +30,9 @@ class Job:
     def snapshot(self):
         return {"id": self.id, "url": self.url, "name": self.options.get("name"),
                 "status": self.status, "fraction": self.fraction, "label": self.label,
-                "path": self.path, "error": self.error}
+                "path": self.path, "error": self.error,
+                "format_ids": list(self.options.get("format_ids") or []),
+                "format_label": self.options.get("format_label")}
 
 
 class JobManager:
@@ -55,6 +57,8 @@ class JobManager:
             ids = []
             for url in urls:
                 job = Job(next(self._ids), url, {**options, "headers": dict(options.get("headers") or {})})
+                if options.get("format_ids"):
+                    job.options["format_ids"] = list(options["format_ids"])
                 self._jobs[job.id] = job
                 self._executor.submit(self._run, job)
                 ids.append(job.id)
@@ -108,11 +112,14 @@ class JobManager:
                     job.label = label
 
         try:
+            selection = {"format_ids": list(job.options["format_ids"])} if job.options.get("format_ids") else {}
+            if job.options.get("stream_kind"):
+                selection["stream_kind"] = job.options["stream_kind"]
             path = self.runner(job.url, folder=self.folder, name=job.options.get("name"),
                                referer=job.options.get("referer"), progress=progress,
                                browser_headers=job.options.get("headers"),
                                page_url=job.options.get("page"), cancel=job.cancel,
-                               source_kind=job.options.get("source_kind", "auto"))
+                               source_kind=job.options.get("source_kind", "auto"), **selection)
             with self._lock:
                 # Возвращённый путь означает готовый файл, даже если отмена пришла на финише.
                 job.path, job.status, job.fraction, job.label = path, "done", 1, "Сохранено"

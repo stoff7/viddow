@@ -20,12 +20,12 @@ git worktree list
 
 ```sh
 python3 -m unittest discover -s tests -v
-python3 -m py_compile download.py jobs.py contracts.py native_host.py native_session.py install_native_host.py server.py
+python3 -m py_compile download.py jobs.py contracts.py inspector.py native_host.py native_session.py install_native_host.py server.py
 node --input-type=module --check < extension/background.js
 node --input-type=module --check < extension/popup.js
 node --check web/app.js
 node --check web/extractor.js
-node --test tests/test_streams.mjs
+node --test tests/test_streams.mjs tests/test_formats.mjs
 git diff --check
 ```
 
@@ -119,4 +119,6 @@ python3 install_native_host.py
 Для автоматических тестов используется отдельный профиль. Установщик поддерживает
 `--user-data-dir /tmp/viddow-test-profile`: регистрация записывается только туда.
 Native-smoke выполняет такую установку сам и удаляет профиль после проверки.
+Finder по умолчанию не открывается. Флаг `VIDDOW_TEST_FINDER=1` запускает настоящий
+`open -R` только для явной ручной проверки, иначе reveal покрыт подменой в Python.
 Не устанавливать хост во все пользовательские профили «на всякий случай».

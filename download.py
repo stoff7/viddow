@@ -185,7 +185,7 @@ def stop_process(process):
     process.wait()
 
 
-def run_tool(command, on_line, cancel=None):
+def run_tool(command, on_line, cancel=None, max_line_chars=None):
     """Запускает ffmpeg/yt-dlp: stdout построчно в on_line, при ошибке — последняя строка stderr."""
     check_cancel(cancel)
     with tempfile.TemporaryFile("w+") as errors:
@@ -203,8 +203,10 @@ def run_tool(command, on_line, cancel=None):
         if watcher:
             watcher.start()
         try:
-            for line in process.stdout:
+            for line in iter(lambda: process.stdout.readline(max_line_chars or -1), ""):
                 check_cancel(cancel)
+                if max_line_chars and len(line) >= max_line_chars:
+                    raise ValueError("Метаданные слишком большие")
                 on_line(line.strip())
             process.wait()
         finally:
@@ -235,7 +237,7 @@ def request_headers(referer, browser_headers):
 
 
 def download(url, folder=DEFAULT_DIR, name=None, referer=None, progress=draw, browser_headers=None,
-             page_url=None, cancel=None, source_kind="auto"):
+             page_url=None, cancel=None, source_kind="auto", format_ids=None, stream_kind=None):
     """Смотрит, что отдал сервер, и выбирает способ — как расширения по заголовкам ответа.
 
     name — заголовок страницы или своё имя; приводится к nice_name() по адресу страницы
@@ -246,11 +248,23 @@ def download(url, folder=DEFAULT_DIR, name=None, referer=None, progress=draw, br
         raise ValueError("Неизвестный тип ссылки")
     if name:
         name = nice_name(name, page_url or referer)
+    if format_ids:
+        from contracts import format_ids_from
+        format_ids = format_ids_from(format_ids)
+        if not shutil.which("yt-dlp"):
+            raise RuntimeError("Для выбора качества нужен yt-dlp: brew install yt-dlp")
+        if len(format_ids) > 1 and not shutil.which("ffmpeg"):
+            raise RuntimeError("Для объединения видео и звука нужен ffmpeg: brew install ffmpeg")
+        headers = request_headers(referer, browser_headers) if source_kind != "page" else {
+            **({"Referer": referer} if referer else {}), **(browser_headers or {})}
+        return run_ytdlp(url, folder, name, headers, progress,
+                         stream=source_kind != "page" and (bool(stream_kind) or urllib.parse.urlparse(url).path.lower().endswith(STREAM_EXT)),
+                         cancel=cancel, format_ids=format_ids)
     if source_kind == "page":
         return download_page(url, folder, name, referer, progress, browser_headers, cancel)
     headers = request_headers(referer, browser_headers)
     url_path = urllib.parse.urlparse(url).path.lower()
-    if source_kind == "auto" and url_path.endswith(STREAM_EXT):
+    if source_kind == "auto" and (stream_kind or url_path.endswith(STREAM_EXT)):
         return download_stream(url, folder, name, headers, progress, cancel)
 
     request = urllib.request.Request(url, headers=headers)
@@ -380,7 +394,7 @@ def download_page(url, folder, name, referer, progress, browser_headers=None, ca
     return run_ytdlp(url, folder, name, headers, progress, cancel=cancel)
 
 
-def run_ytdlp(url, folder, name, headers, progress, stream=False, cancel=None):
+def run_ytdlp(url, folder, name, headers, progress, stream=False, cancel=None, format_ids=None):
     """yt-dlp с параллельной загрузкой кусочков потока и заданными заголовками.
 
     stream=True — ссылка на поток, пойманная в браузере:
@@ -422,10 +436,17 @@ def run_ytdlp(url, folder, name, headers, progress, stream=False, cancel=None):
                    # она удаляется вместе с tmp, даже если загрузка упала
                    "-P", folder, "-P", f"temp:{tmp}",
                    "-o", template, "--print-to-file", "after_move:filepath", saved_to]
-        if stream:
+        if format_ids:
+            command += ["--ignore-config", "-f", "+".join(f"all[format_id='{identifier}']" for identifier in format_ids),
+                        "--audio-multistreams"]
+            if shutil.which("ffmpeg"):
+                # Нужны языковые метки, но не сырой infojson с URL/заголовками.
+                command += ["--embed-metadata", "--no-embed-info-json", "--no-embed-chapters"]
+        elif stream:
             # «/b» — запасной вариант, если отдельных аудиоформатов нет (звук внутри видео)
-            command += ["-f", "bv*+mergeall[vcodec=none]/b", "--audio-multistreams",
-                        "--impersonate", "chrome"]
+            command += ["-f", "bv*+mergeall[vcodec=none]/b", "--audio-multistreams"]
+        if stream:
+            command += ["--impersonate", "chrome"]
         for key, value in headers.items():
             command += ["--add-headers", f"{key}:{value}"]
         try:

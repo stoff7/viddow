@@ -5,7 +5,7 @@
 Session v2 (основная панель):
     ← {"type": "session", "settings": {"workers": 2, "output_dir": "~/Downloads"}}
     → {"type": "ready", "protocol": 2, "session", "jobs", "settings", "tools"}
-    ← {"command": "download|cancel|retry|clear|configure|reveal", "request_id", "session", ...}
+    ← {"command": "download|inspect|inspect_cancel|cancel|retry|clear|configure|reveal", "request_id", "session", ...}
     → {"type": "reply", "request_id", "ok", "result" | "error"}
     → {"type": "state", "session", "jobs", "settings", "tools"} при изменении состояния
 Команды требуют актуальный session ID. Очередь общая для вкладок расширения,
@@ -18,7 +18,8 @@ Session v2 (основная панель):
 Расширение закрыло порт (браузер закрыт/расширение перезагружено) → EOF → хост останавливает
 yt-dlp/ffmpeg, а finally в download.py убирают недокачанное.
 
-Отмена отдельной задачи session v2 не закрывает канал. Полный контракт:
+Отдельный inspect публикует state.analysis, не занимая очередь загрузок.
+Отмена отдельной задачи/анализа session v2 не закрывает канал. Полный контракт:
 docs/extension-control.md. Регистрация: python3 install_native_host.py; запуск через native_host.sh.
 """
 import json

@@ -23,6 +23,17 @@ class Response(io.BytesIO):
 
 
 class RoutingTests(unittest.TestCase):
+    @patch("download.run_ytdlp", return_value="selected.mp4")
+    @patch("download.shutil.which", side_effect=lambda tool: None if tool == "ffmpeg" else "yt-dlp")
+    @patch("download.urllib.request.urlopen")
+    def test_selected_formats_require_merger_and_never_fall_back(self, urlopen, which, ytdlp):
+        with self.assertRaisesRegex(RuntimeError, "ffmpeg"):
+            download.download("https://example.com/watch", format_ids=["v90", "ru"])
+        ytdlp.assert_not_called()
+        self.assertEqual(download.download("https://example.com/watch", format_ids=["v90"]), "selected.mp4")
+        self.assertEqual(ytdlp.call_args.kwargs["format_ids"], ["v90"])
+        urlopen.assert_not_called()
+
     @patch("download.shutil.which", return_value=None)
     def test_missing_tools_explain_installation_without_creating_files(self, which):
         with tempfile.TemporaryDirectory() as folder:
@@ -67,6 +78,20 @@ class RoutingTests(unittest.TestCase):
 
 
 class TransferTests(unittest.TestCase):
+    @patch("download.shutil.which", return_value="yt-dlp")
+    def test_explicit_ids_become_literal_filters_and_no_quality_fallback(self, which):
+        with tempfile.TemporaryDirectory() as folder:
+            saved = Path(folder, "selected.mp4")
+            saved.write_bytes(b"done")
+            def finish(command, on_line, cancel):
+                self.assertEqual(command[command.index("-f") + 1], "all[format_id='best']+all[format_id='ru']")
+                self.assertIn("--ignore-config", command)
+                self.assertIn("--audio-multistreams", command)
+                Path(command[command.index("--print-to-file") + 2]).write_text(str(saved))
+            with patch("download.run_tool", side_effect=finish):
+                self.assertEqual(download.run_ytdlp("https://example.com/watch", folder, "chosen", {}, lambda *_: None,
+                                                   format_ids=["best", "ru"]), str(saved))
+
     def test_save_does_not_overwrite_and_removes_incomplete(self):
         with tempfile.TemporaryDirectory() as folder:
             Path(folder, "video.mp4").write_bytes(b"original")

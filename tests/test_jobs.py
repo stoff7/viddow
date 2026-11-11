@@ -77,7 +77,7 @@ class JobTests(unittest.TestCase):
 
         manager = self.manager(runner=runner)
         first = manager.add(["https://example.com/watch"], name="Title", headers={"Cookie": "private"},
-                            source_kind="page", referer="https://example.com/")[0]
+                            source_kind="page", referer="https://example.com/", format_ids=["v90", "ru", "en"])[0]
         wait_for(lambda: manager.snapshots()[0]["status"] == "error")
         self.assertNotIn("private", str(manager.snapshots()))
         second = manager.retry(first)
@@ -85,6 +85,10 @@ class JobTests(unittest.TestCase):
         wait_for(lambda: manager.snapshots()[1]["status"] == "done")
         self.assertEqual(attempts[1][1]["browser_headers"], {"Cookie": "private"})
         self.assertEqual(attempts[1][1]["source_kind"], "page")
+        self.assertEqual(attempts[1][1]["format_ids"], ["v90", "ru", "en"])
+        snapshot = manager.snapshots()[1]
+        snapshot["format_ids"].append("changed")
+        self.assertEqual(manager.snapshots()[1]["format_ids"], ["v90", "ru", "en"])
         with self.assertRaises(Conflict):
             manager.retry(second)
         self.assertEqual(manager.cancel(second)["status"], "done")

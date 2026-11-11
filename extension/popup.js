@@ -1,4 +1,5 @@
 import { groupStreams } from './stream-model.mjs';
+import { formatLabel, mainFormats, choiceProblem, durationLabel } from './format-model.mjs';
 
 const $ = (id) => document.getElementById(id);
 const el = (tag, className, text) => Object.assign(document.createElement(tag),
@@ -7,6 +8,7 @@ const ACTIVE = new Set(['queued', 'running', 'cancelling']);
 const STATUS = { queued: 'В очереди', running: 'Скачиваем', cancelling: 'Останавливаем…', done: 'Готово', error: 'Ошибка', cancelled: 'Отменено' };
 let tab = null, tabKey = '', items = [], state = { jobs: [], settings: {} }, online = false;
 let filter = 'all', settingsDirty = false, refreshRevision = 0;
+let analysisKey = '', dismissedAnalysis = '', inspectPending = false, selectionPending = false;
 const choices = new Map(), cards = new Map();
 const ownWindow = await chrome.windows.getCurrent();
 
@@ -51,6 +53,12 @@ function controls() {
   $('saveSettings').disabled = !online || active;
   $('settingsHint').textContent = active ? 'Настройки можно изменить, когда активные загрузки завершатся или будут отменены.' : '';
   $('clear').disabled = !online || !state.jobs.some((job) => !ACTIVE.has(job.status));
+  const analysing = inspectPending || ['running', 'cancelling'].includes(state.analysis?.status);
+  $('inspectPage').hidden = !validUrl(tab?.url);
+  $('inspectPage').disabled = !online || analysing || !validUrl(tab?.url);
+  $('inspectLink').disabled = !online || analysing;
+  $('cancelAnalysis').disabled = !online || state.analysis?.status !== 'running';
+  updateFormatChoice();
 }
 async function refreshTab() {
   const revision = ++refreshRevision;
@@ -69,6 +77,93 @@ async function start(item, title = '', page = '') {
   notice('Добавлено в очередь. Скачивание продолжится, если закрыть панель.');
   view('jobs');
 }
+async function inspect(item, title = '', page = '') {
+  inspectPending = true; controls(); notice('');
+  try {
+    await send({ type: 'inspect', item, title, page });
+    dismissedAnalysis = ''; view('streams');
+  } catch (error) { notice(error.message, true); }
+  finally { inspectPending = false; controls(); }
+}
+function selectedFormats() {
+  const main = state.analysis?.result?.formats.find(format => format.id === $('videoFormat').value);
+  const audio = main?.kind === 'video' && !$('silentVideo').checked
+    ? [...$('audioFormats').querySelectorAll('input:checked')].map(input => input.value) : [];
+  return { main, audio };
+}
+function updateFormatChoice() {
+  const { main, audio } = selectedFormats();
+  const problem = choiceProblem(main, audio, state.tools?.ffmpeg, $('silentVideo').checked);
+  $('audioChoices').hidden = main?.kind !== 'video';
+  $('downloadFormat').disabled = !online || state.analysis?.status !== 'done' || Boolean(problem) || selectionPending;
+  $('formatHint').textContent = problem || (main?.kind === 'combined' ? 'Звук уже встроен в этот формат.' : main?.kind === 'unknown'
+    ? 'Состав дорожек не указан источником. Скачается выбранный формат.' : $('silentVideo').checked ? 'Будет сохранено видео без звука.' : 'Будут сохранены выбранные дорожки.');
+}
+function renderAnalysis() {
+  const analysis = state.analysis;
+  $('analysisCard').hidden = !analysis || analysis.id === dismissedAnalysis;
+  if (!analysis) { analysisKey = ''; return; }
+  $('analysisSource').textContent = analysis.url;
+  const running = ['running', 'cancelling'].includes(analysis.status);
+  $('cancelAnalysis').hidden = !running;
+  $('closeAnalysis').hidden = running;
+  $('analysisStatus').textContent = analysis.status === 'running' ? 'Получаем метаданные… Загрузка ещё не началась.' : analysis.status === 'cancelling'
+    ? 'Останавливаем анализ…' : analysis.status === 'error' ? analysis.error : analysis.status === 'cancelled' ? 'Анализ отменён.' : 'Выберите формат перед скачиванием.';
+  $('analysisStatus').classList.toggle('error', analysis.status === 'error');
+  $('analysisResult').hidden = analysis.status !== 'done';
+  const key = `${analysis.id}:${analysis.status}`;
+  if (key !== analysisKey && analysis.status === 'done') {
+    const result = analysis.result;
+    $('videoTitle').textContent = result.title;
+    const kind = result.hls_kind === 'master' ? 'HLS: главный плейлист' : result.hls_kind === 'media' ? 'HLS: медиа-плейлист' : '';
+    $('videoFacts').textContent = [durationLabel(result), kind].filter(Boolean).join(' · ');
+    $('videoThumbnail').hidden = !result.thumbnail;
+    if (result.thumbnail) $('videoThumbnail').src = result.thumbnail;
+    else $('videoThumbnail').removeAttribute('src');
+    $('videoThumbnail').onerror = () => { $('videoThumbnail').hidden = true; };
+    $('videoFormat').replaceChildren(...mainFormats(result.formats).map(format => {
+      const option = el('option', '', formatLabel(format)); option.value = format.id; return option;
+    }));
+    $('silentVideo').checked = false;
+    $('audioFormats').replaceChildren(...result.formats.filter(format => format.kind === 'audio').map(format => {
+      const label = el('label', 'audio-option'), input = el('input');
+      input.type = 'checkbox'; input.value = format.id;
+      input.onchange = () => { if (input.checked) $('silentVideo').checked = false; updateFormatChoice(); };
+      label.append(input, el('span', '', formatLabel(format))); return label;
+    }));
+  }
+  analysisKey = key;
+  updateFormatChoice();
+}
+$('inspectPage').onclick = () => inspect({ url: tab.url, source_kind: 'page' }, tab.title, tab.url);
+$('inspectLink').onclick = () => {
+  const url = $('manualUrl').value.trim();
+  if (!validUrl(url)) { notice('Нужен адрес http:// или https://', true); return; }
+  inspect({ url });
+};
+$('cancelAnalysis').onclick = async () => {
+  try { await send({ type: 'inspect_cancel', analysis_id: state.analysis.id, session: state.session }); }
+  catch (error) { notice(error.message, true); }
+};
+$('closeAnalysis').onclick = () => { dismissedAnalysis = state.analysis.id; renderAnalysis(); };
+$('videoFormat').onchange = () => { $('silentVideo').checked = false; updateFormatChoice(); };
+$('silentVideo').onchange = () => {
+  if ($('silentVideo').checked) $('audioFormats').querySelectorAll('input').forEach(input => { input.checked = false; });
+  updateFormatChoice();
+};
+$('formatForm').onsubmit = async event => {
+  event.preventDefault();
+  const { main, audio } = selectedFormats();
+  const problem = choiceProblem(main, audio, state.tools?.ffmpeg, $('silentVideo').checked);
+  if (problem) { notice(problem, true); return; }
+  selectionPending = true; controls();
+  try {
+    await send({ type: 'download_selection', analysis_id: state.analysis.id,
+      format_ids: [main.id, ...audio], session: state.session });
+    notice('Выбранный формат добавлен в очередь.'); view('jobs');
+  } catch (error) { notice(error.message, true); }
+  finally { selectionPending = false; controls(); }
+};
 async function copy(text) {
   await navigator.clipboard.writeText(text);
   notice('Скопировано');
@@ -100,6 +195,9 @@ function renderStreams() {
     };
     const actions = el('div', 'stream-actions');
     actions.append(el('span', 'stream-observed', observed(item) ? `Замечен в ${observed(item)}` : 'Обнаружен на вкладке'), button);
+    const analyse = el('button', 'text-button', 'Качество и звук');
+    analyse.disabled = !online || inspectPending || ['running', 'cancelling'].includes(state.analysis?.status);
+    analyse.onclick = () => inspect(item, tab?.title, tab?.url);
     const details = el('details', 'stream-detail');
     details.dataset.key = group.key;
     details.open = open.has(group.key);
@@ -119,7 +217,7 @@ function renderStreams() {
     const copyButton = el('button', 'text-button', 'Копировать адрес');
     copyButton.onclick = () => copy(item.url).catch(() => notice('Не удалось скопировать. Выделите полный адрес вручную.', true));
     details.append(fullUrl, copyButton);
-    li.append(heading, el('div', 'stream-host', group.host), path, actions, details);
+    li.append(heading, el('div', 'stream-host', group.host), path, actions, analyse, details);
     return li;
   }));
   if (focusedUrl) [...$('streams').querySelectorAll('button[data-url]')].find((button) => button.dataset.url === focusedUrl)?.focus({ preventScroll: true });
@@ -127,12 +225,12 @@ function renderStreams() {
 function makeJob(job) {
   const root = el('li', 'job'); root.dataset.id = job.id;
   const title = el('div', 'job-title'), source = el('div', 'job-source');
-  const status = el('div', 'job-status'), label = el('div', 'job-label');
+  const status = el('div', 'job-status'), label = el('div', 'job-label'), format = el('div', 'job-format');
   const bar = el('div', 'bar'), fill = el('span'); bar.append(fill);
   bar.setAttribute('role', 'progressbar'); bar.setAttribute('aria-valuemin', '0'); bar.setAttribute('aria-valuemax', '100');
   const actions = el('div', 'job-actions');
-  root.append(title, source, status, bar, label, actions);
-  return { root, title, source, status, label, bar, fill, actions, actionKey: '' };
+  root.append(title, source, format, status, bar, label, actions);
+  return { root, title, source, format, status, label, bar, fill, actions, actionKey: '' };
 }
 function action(text, callback) {
   const button = el('button', 'text-button', text);
@@ -163,6 +261,8 @@ function renderJobs() {
     card.title.textContent = job.path ? job.path.split(/[\\/]/).pop() : job.name || decoded(new URL(job.url).pathname.split('/').pop()) || hostOf(job.url);
     card.title.title = job.path || job.url;
     card.source.textContent = hostOf(job.url);
+    card.format.hidden = !job.format_ids?.length;
+    card.format.textContent = job.format_ids?.length ? `Выбрано: ${job.format_label || job.format_ids.join(' + ')}` : '';
     const percent = job.fraction == null ? null : Math.round(Math.max(0, Math.min(1, job.fraction)) * 100);
     card.status.textContent = STATUS[job.status] + (job.status === 'running' && percent !== null ? ` · ${percent}%` : '');
     card.label.textContent = job.error || (ACTIVE.has(job.status) ? job.label : '');
@@ -199,7 +299,7 @@ function renderState(next) {
   $('folderLabel').textContent = folder.endsWith('/Downloads') ? 'Загрузки' : folder.split('/').filter(Boolean).pop();
   $('folderLabel').title = folder;
   $('toolsStatus').textContent = state.tools ? `yt-dlp: ${state.tools.yt_dlp ? 'найден' : 'не найден'}. ffmpeg: ${state.tools.ffmpeg ? 'найден' : 'не найден'}.` : 'Подключите помощник, чтобы проверить инструменты.';
-  renderJobs(); renderStreams();
+  renderAnalysis(); renderJobs(); renderStreams();
 }
 function renderHost(host) {
   online = host?.status === 'online';

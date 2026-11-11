@@ -87,7 +87,9 @@ async function ensureHost() {
         update('host', () => ({ status: 'offline', error }));
         update('nativeState', (state) => state ? { ...state, jobs: state.jobs.map((job) =>
           ['queued', 'running', 'cancelling'].includes(job.status)
-            ? { ...job, status: 'error', error: 'Загрузчик отключён. Добавьте ссылку заново после подключения.' } : job) } : null);
+            ? { ...job, status: 'error', error: 'Загрузчик отключён. Добавьте ссылку заново после подключения.' } : job),
+          analysis: state.analysis && ['running', 'cancelling'].includes(state.analysis.status)
+            ? { ...state.analysis, status: 'error', error: 'Загрузчик отключён. Запросите качество заново.' } : state.analysis } : null);
       };
       current.onMessage.addListener((message) => {
         if (ended) return;
@@ -142,11 +144,18 @@ async function command(message) {
 }
 async function handle(message) {
   if (message.type === 'connect') { await ensureHost(); return {}; }
-  if (message.type === 'download') {
+  if (message.type === 'download' || message.type === 'inspect') {
     const item = message.item;
-    return command({ command: 'download', urls: [item.url], name: message.title || '',
+    return command({ command: message.type, urls: [item.url], name: message.title || '',
       page: message.page || '', referer: item.referer || '', headers: item.headers || {},
-      source_kind: item.source_kind || 'auto' });
+      source_kind: item.source_kind || 'auto', stream_kind: item.kind || null });
+  }
+  if (message.type === 'download_selection') {
+    return command({ command: 'download', analysis_id: message.analysis_id,
+      format_ids: message.format_ids, session: message.session });
+  }
+  if (message.type === 'inspect_cancel') {
+    return command({ command: 'inspect_cancel', analysis_id: message.analysis_id, session: message.session });
   }
   if (['cancel', 'retry', 'clear', 'reveal'].includes(message.type)) {
     return command({ command: message.type, id: message.id, session: message.session });

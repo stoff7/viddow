@@ -17,7 +17,23 @@
 <main>
 <section id="streamsView">
   <div class="page-card"><div class="eyebrow">ТЕКУЩАЯ ВКЛАДКА</div><h1 id="tabTitle">Открытая страница</h1><p id="tabHost" class="muted"></p><button id="page" class="button primary wide">Скачать видео со страницы <span aria-hidden="true">↓</span></button><p class="page-note">Загрузчик сам попробует найти видео по адресу страницы.</p></div>
-  <form id="linkForm" class="link-form"><label for="manualUrl">Или вставьте другую ссылку</label><div class="input-row"><input id="manualUrl" type="url" placeholder="https://…" required spellcheck="false" autocomplete="off"><button id="addLink" class="button" type="submit" aria-label="Скачать по ссылке">↓</button></div></form>
+  <button id="inspectPage" class="text-button inspect-page">Качество и звук на странице</button>
+  <form id="linkForm" class="link-form"><label for="manualUrl">Или вставьте другую ссылку</label><div class="input-row"><input id="manualUrl" type="url" placeholder="https://…" required spellcheck="false" autocomplete="off"><button id="addLink" class="button" type="submit" aria-label="Скачать по ссылке">↓</button></div><button id="inspectLink" class="text-button" type="button">Качество и звук по ссылке</button></form>
+  <section id="analysisCard" class="analysis-card" aria-label="Выбор качества и звука" hidden>
+    <div class="section-heading"><h2>Качество и звук</h2><button id="closeAnalysis" class="text-button" type="button">Закрыть</button></div>
+    <p id="analysisSource" class="muted"></p><p id="analysisStatus" role="status"></p>
+    <button id="cancelAnalysis" class="text-button" type="button" hidden>Отменить анализ</button>
+    <div id="analysisResult" hidden>
+      <img id="videoThumbnail" alt="Обложка видео" referrerpolicy="no-referrer" hidden>
+      <h3 id="videoTitle"></h3><p id="videoFacts" class="muted"></p>
+      <form id="formatForm">
+        <label for="videoFormat">Видео / формат</label><select id="videoFormat"></select>
+        <fieldset id="audioChoices"><legend>Звуковые дорожки</legend><div id="audioFormats"></div><label class="audio-option"><input id="silentVideo" type="checkbox"> Видео без звука</label></fieldset>
+        <p id="formatHint" class="field-note"></p><button id="downloadFormat" class="button primary wide" type="submit">Скачать выбранное</button>
+      </form>
+    </div>
+    <p class="field-note analysis-note">Анализ обращается к источнику. Временная ссылка может истечь. Обычное скачивание доступно без анализа.</p>
+  </section>
   <div class="section-heading"><h2>Найденные потоки</h2><span class="muted" id="addressCount"></span></div>
   <div id="streamsEmpty" class="empty"><span class="empty-icon" aria-hidden="true">▷</span><h3>Запустите видео</h3><p>Найденные адреса появятся здесь.<br>Один ролик может создать несколько ссылок.</p></div>
   <ul id="streams" class="stream-list"></ul>

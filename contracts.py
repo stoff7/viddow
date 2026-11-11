@@ -5,6 +5,16 @@ import urllib.parse
 MAX_URLS = 50
 
 
+def format_ids_from(value):
+    if value is None:
+        return []
+    if not (isinstance(value, list) and 1 <= len(value) <= 9 and all(
+            isinstance(item, str) and re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}", item) for item in value)
+            and len(set(value)) == len(value)):
+        raise ValueError("Выберите от 1 до 9 разных ID форматов без выражений yt-dlp")
+    return list(value)
+
+
 def valid_url(value):
     if not isinstance(value, str) or re.search(r"[\r\n\x00]", value):
         return False
@@ -25,6 +35,12 @@ def download_options(body):
             for k, v in headers.items())):
         raise ValueError("Заголовки должны быть строками без переводов строк")
     options = {"headers": headers, "source_kind": body.get("source_kind", "auto")}
+    if body.get("stream_kind") is not None:
+        if body["stream_kind"] not in ("HLS", "DASH"):
+            raise ValueError("Неизвестный тип потока")
+        options["stream_kind"] = body["stream_kind"]
+    if body.get("format_ids") is not None:
+        options["format_ids"] = format_ids_from(body["format_ids"])
     if options["source_kind"] not in ("auto", "page", "direct"):
         raise ValueError("Неизвестный тип ссылки")
     for key in ("name", "referer", "page"):

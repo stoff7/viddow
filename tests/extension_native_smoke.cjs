@@ -29,6 +29,14 @@ const alive = pid => { try { process.kill(pid, 0); return true; } catch (error) 
     '-t', '1', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', path.join(media, 'video.mp4')]);
   execFileSync('ffmpeg', ['-v', 'error', '-i', path.join(media, 'video.mp4'), '-c', 'copy',
     '-hls_time', '1', '-hls_list_size', '0', path.join(media, 'media.m3u8')]);
+  for (const [name, size] of [['low', '160x90'], ['high', '320x180']]) {
+    execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', `color=c=blue:s=${size}:r=10`, '-t', '1',
+      '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-an', '-hls_time', '1', '-hls_list_size', '0', path.join(media, `${name}.m3u8`)]);
+  }
+  for (const [name, frequency] of [['ru', 440], ['en', 880]]) {
+    execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', `sine=frequency=${frequency}:sample_rate=48000`, '-t', '1',
+      '-c:a', 'aac', '-vn', '-hls_time', '1', '-hls_list_size', '0', path.join(media, `${name}.m3u8`)]);
+  }
   const video = fs.readFileSync(path.join(media, 'video.mp4'));
   const requests = [];
   const server = http.createServer((request, response) => {
@@ -44,12 +52,24 @@ const alive = pid => { try { process.kill(pid, 0); return true; } catch (error) 
       const timer = setInterval(() => { response.write(chunk); if (++sent === count) { clearInterval(timer); response.end(); } }, 30);
       response.on('close', () => clearInterval(timer)); return;
     }
+    if (url.pathname === '/inspect-slow.m3u8') {
+      response.writeHead(200, { 'Content-Type': 'application/vnd.apple.mpegurl' }); response.flushHeaders();
+      const timer = setTimeout(() => response.end('#EXTM3U\n#EXT-X-ENDLIST\n'), 20000);
+      response.on('close', () => clearTimeout(timer)); return;
+    }
     let body, type;
     if (url.pathname.endsWith('.mp4')) { body = video; type = 'video/mp4'; }
-    else if (url.pathname.endsWith('master.m3u8')) {
+    else if (url.pathname === '/quality/master.m3u8') {
+      body = Buffer.from('#EXTM3U\n'
+        + '#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="Russian",LANGUAGE="ru",DEFAULT=YES,AUTOSELECT=YES,URI="/ru.m3u8"\n'
+        + '#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="English",LANGUAGE="en",DEFAULT=NO,AUTOSELECT=YES,URI="/en.m3u8"\n'
+        + '#EXT-X-STREAM-INF:BANDWIDTH=150000,RESOLUTION=160x90,CODECS="avc1.42c00b",AUDIO="audio"\n/low.m3u8\n'
+        + '#EXT-X-STREAM-INF:BANDWIDTH=300000,RESOLUTION=320x180,CODECS="avc1.42c00c",AUDIO="audio"\n/high.m3u8\n');
+      type = 'application/vnd.apple.mpegurl';
+    } else if (url.pathname.endsWith('master.m3u8')) {
       body = Buffer.from('#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=50000,RESOLUTION=64x64\n/media.m3u8\n');
       type = 'application/vnd.apple.mpegurl';
-    } else if (url.pathname === '/media.m3u8' || url.pathname === '/media0.ts') {
+    } else if (/^\/(media|low|high|ru|en)(\d+\.ts|\.m3u8)$/.test(url.pathname)) {
       body = fs.readFileSync(path.join(media, url.pathname.slice(1)));
       type = url.pathname.endsWith('.ts') ? 'video/mp2t' : 'application/vnd.apple.mpegurl';
     } else {
@@ -103,8 +123,13 @@ const alive = pid => { try { process.kill(pid, 0); return true; } catch (error) 
     const saved = (await state()).jobs[0].path;
     assert.deepEqual(fs.readFileSync(saved), video);
     console.log('PASS real sidePanel → native host → MP4 (byte comparison)');
-    await panel.getByRole('button', { name: 'В Finder', exact: true }).click();
-    assert.equal(await panel.locator('#message.error').count(), 0);
+    assert.equal(await panel.getByRole('button', { name: 'В Finder', exact: true }).isVisible(), true);
+    // Finder — настольное приложение пользователя. В обычном прогоне не открываем
+    // окна; протокол reveal покрыт Python-тестом с подменой subprocess.run.
+    if (process.env.VIDDOW_TEST_FINDER === '1') {
+      await panel.getByRole('button', { name: 'В Finder', exact: true }).click();
+      assert.equal(await panel.locator('#message.error').count(), 0);
+    }
 
     // Настоящий yt-dlp: явная команда страницы, поддерживаемая generic extractor.
     await panel.locator('[data-view=streams]').click(); await panel.locator('#page').click();
@@ -130,6 +155,68 @@ const alive = pid => { try { process.kill(pid, 0); return true; } catch (error) 
     const hlsPath = (await state()).jobs[2].path;
     assert.match(execFileSync('ffprobe', ['-v', 'error', '-show_entries', 'stream=width,height', '-of', 'csv=p=0', hlsPath], { encoding: 'utf8' }), /64,64/);
     console.log('PASS actual yt-dlp page and HLS with selected query and fresh headers');
+
+    // Этап 4: никаких запросов анализа до клика; точное качество + две озвучки.
+    assert.equal((await state()).analysis, null);
+    assert.equal(requests.some(request => request.path === '/quality/master.m3u8'), false);
+    await panel.locator('[data-view=streams]').click();
+    await panel.locator('#manualUrl').fill(base + '/quality/master.m3u8');
+    await panel.locator('#inspectLink').click();
+    await panel.locator('#analysisResult').waitFor();
+    const analysis = (await state()).analysis;
+    assert.equal(analysis.status, 'done');
+    assert.equal(analysis.result.hls_kind, 'master');
+    assert.equal((await state()).jobs.length, 3);
+    const low = analysis.result.formats.find(format => format.height === 90 && format.kind === 'video');
+    const ru = analysis.result.formats.find(format => format.language === 'ru' && format.kind === 'audio');
+    const en = analysis.result.formats.find(format => format.language === 'en' && format.kind === 'audio');
+    assert.ok(low && ru && en, JSON.stringify(analysis.result));
+    await panel.locator('#videoFormat').selectOption(low.id);
+    await panel.locator(`#audioFormats input[value="${ru.id}"]`).check();
+    await panel.locator(`#audioFormats input[value="${en.id}"]`).check();
+    await panel.setViewportSize({ width: 320, height: 900 });
+    for (const theme of ['light', 'dark']) {
+      if (await panel.locator('html').getAttribute('data-theme') !== theme) await panel.locator('#theme').click();
+      assert.equal(await panel.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+      await panel.locator('#analysisCard').scrollIntoViewIfNeeded();
+      await panel.screenshot({ path: path.join(artifacts, `quality-${theme}-320.png`) });
+    }
+    // Переход по вкладке не подменяет источник завершённого анализа.
+    await source.goto(base + '/other');
+    await panel.waitForFunction(() => document.querySelector('#tabTitle').textContent === 'Другая вкладка');
+    await panel.locator('#downloadFormat').click();
+    await waitUntil(async () => (await state()).jobs.length === 4 && ['done', 'error'].includes((await state()).jobs[3].status), 'Selected format timeout', 20000);
+    const selected = (await state()).jobs[3];
+    assert.equal(selected.status, 'done', JSON.stringify(selected));
+    assert.deepEqual(selected.format_ids, [low.id, ...analysis.result.formats.filter(format => [ru.id, en.id].includes(format.id)).map(format => format.id)]);
+    assert.equal(selected.url, base + '/quality/master.m3u8');
+    const tracks = JSON.parse(execFileSync('ffprobe', ['-v', 'error', '-show_streams', '-of', 'json', selected.path], { encoding: 'utf8' })).streams;
+    assert.equal(tracks.find(track => track.codec_type === 'video').height, 90);
+    assert.equal(tracks.find(track => track.codec_type === 'video').width, 160);
+    const audioTracks = tracks.filter(track => track.codec_type === 'audio');
+    assert.equal(audioTracks.length, 2, JSON.stringify(tracks));
+    assert.deepEqual(audioTracks.map(track => track.tags.language).sort(), ['eng', 'rus']);
+    // Media HLS не получает выдуманных альтернатив/классификации по имени.
+    await panel.locator('[data-view=streams]').click();
+    await panel.locator('#manualUrl').fill(base + '/low.m3u8'); await panel.locator('#inspectLink').click();
+    await waitUntil(async () => (await state()).analysis.status === 'done' && (await state()).analysis.id !== analysis.id, 'Media analysis');
+    assert.equal((await state()).analysis.result.hls_kind, 'media');
+    assert.equal((await state()).analysis.result.formats.length, 1);
+    assert.equal((await send(panel, { type: 'download_selection', analysis_id: analysis.id, format_ids: [low.id], session: initialSession })).ok, false);
+    await panel.locator('#manualUrl').fill(base + '/inspect-slow.m3u8'); await panel.locator('#inspectLink').click();
+    await panel.locator('#cancelAnalysis').waitFor();
+    assert.equal((await state()).analysis.status, 'running');
+    // Команда download отвечает сразу, даже пока yt-dlp анализа ждёт сервер.
+    await add(base + '/during-analysis.mp4');
+    await waitUntil(async () => (await state()).jobs.some(job => job.url.endsWith('/during-analysis.mp4') && job.status === 'done'), 'Analysis blocked downloads');
+    await panel.locator('[data-view=streams]').click(); await panel.locator('#cancelAnalysis').click();
+    await waitUntil(async () => (await state()).analysis.status === 'cancelled', 'Analysis cancellation');
+    await panel.locator('#manualUrl').fill(base + '/missing.mp4'); await panel.locator('#inspectLink').click();
+    await panel.locator('#analysisStatus.error').waitFor();
+    assert.equal(await panel.locator('#addLink').isEnabled(), true);
+    assert.equal(await panel.locator('#page').isEnabled(), true);
+    await source.goto(base + '/watch');
+    console.log('PASS quality selection: exact 160×90 + Russian/English by ffprobe; media/master, stale analysis, cancellation, error, parallel download');
 
     await add(base + '/slow.mp4');
     await panel.locator('.job.running').waitFor();
@@ -182,7 +269,9 @@ const alive = pid => { try { process.kill(pid, 0); return true; } catch (error) 
     await waitUntil(async () => (await state()).jobs.some(job => job.url.endsWith('/new.mp4') && job.status === 'done'), 'New folder download');
     const newSaved = (await state()).jobs.find(job => job.url.endsWith('/new.mp4')).path;
     assert.equal(path.dirname(newSaved), fs.realpathSync(newOutput)); assert.ok(fs.existsSync(saved));
-    assert.equal((await send(panel, { type: 'reveal', id: 1, session: initialSession })).ok, true);
+    if (process.env.VIDDOW_TEST_FINDER === '1') {
+      assert.equal((await send(panel, { type: 'reveal', id: 1, session: initialSession })).ok, true);
+    }
     for (const name of ['missing', 'denied']) {
       await add(base + `/${name}.mp4`);
       await waitUntil(async () => (await state()).jobs.some(job => job.url.endsWith(`/${name}.mp4`) && job.status === 'error'), name + ' error missing');
