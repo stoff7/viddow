@@ -10,6 +10,7 @@ import download
 from contracts import download_options
 from jobs import JobManager
 from inspector import Inspector
+from source_auth import cookie_browser_from
 
 
 def settings_from(value):
@@ -32,6 +33,7 @@ def settings_from(value):
 class Session:
     def __init__(self, settings, send, manager_factory=JobManager, history=None):
         workers, folder = settings_from(settings)
+        self.youtube_browser = cookie_browser_from(settings.get("youtube_browser", "none"))
         self.manager = manager_factory(workers=workers, folder=folder)
         self.send = send
         self.id = uuid.uuid4().hex
@@ -42,7 +44,7 @@ class Session:
     def state(self):
         return {"type": "state", "session": self.id, "jobs": self.manager.snapshots(),
                 "history_version": 1,
-                "settings": {"workers": self.manager.workers, "output_dir": self.manager.folder},
+                "settings": {"workers": self.manager.workers, "output_dir": self.manager.folder, "youtube_browser": self.youtube_browser},
                 "tools": {"yt_dlp": bool(shutil.which("yt-dlp")), "ffmpeg": bool(shutil.which("ffmpeg"))},
                 "analysis": self.inspector.snapshot()}
 
@@ -58,11 +60,15 @@ class Session:
                     urls, options = self.inspector.selection(message["analysis_id"], message.get("format_ids"))
                 else:
                     urls, options = download_options(message)
+                    if self.youtube_browser != "none":
+                        options["cookie_browser"] = self.youtube_browser
                 result = {"ids": self.manager.add(urls, **options)}
             elif command == "inspect":
                 urls, options = download_options(message)
                 if len(urls) != 1:
                     raise ValueError("Для анализа выберите один адрес")
+                if self.youtube_browser != "none":
+                    options["cookie_browser"] = self.youtube_browser
                 result = self.inspector.start(urls[0], **options)
             elif command == "inspect_cancel":
                 identifier = message.get("analysis_id")
@@ -76,7 +82,7 @@ class Session:
                 job = next((row for row in self.manager.snapshots() if row["id"] == job_id), None)
                 if not job or not job["restored"] or not job["page"] or not job["page_retry"]:
                     raise ValueError("Исходная страница не сохранена. Вставьте свежую ссылку.")
-                result = self.inspector.start(job["page"], source_kind="page", name=job["name"], page=job["page"], headers={})
+                result = self.inspector.start(job["page"], source_kind="page", name=job["name"], page=job["page"], headers={}, cookie_browser=self.youtube_browser)
             elif command in ("cancel", "retry", "reveal"):
                 job_id = message.get("id")
                 if type(job_id) is not int:
@@ -84,7 +90,7 @@ class Session:
                 if command == "cancel":
                     result = self.manager.cancel(job_id)
                 elif command == "retry":
-                    result = {"id": self.manager.retry(job_id)}
+                    result = {"id": self.manager.retry(job_id, cookie_browser=self.youtube_browser)}
                 else:
                     job = next((job for job in self.manager.snapshots() if job["id"] == job_id), None)
                     if not job or job["status"] != "done" or not job["path"] or not os.path.isfile(job["path"]):
@@ -95,7 +101,11 @@ class Session:
                 self.manager.clear()
             elif command == "configure":
                 workers, folder = settings_from(message.get("settings"))
+                browser = cookie_browser_from(message["settings"].get("youtube_browser", "none"))
                 self.manager.configure(workers, folder)
+                if browser != self.youtube_browser:
+                    self.inspector.invalidate()
+                self.youtube_browser = browser
                 result = self.state()["settings"]
             else:
                 raise ValueError("Неизвестная команда")

@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 import download
+from diagnostics import describe_error
 
 ACTIVE = {"queued", "running", "cancelling"}
 TERMINAL = {"done", "error", "cancelled", "interrupted"}
@@ -31,10 +32,13 @@ class Job:
     cancel: threading.Event = field(default_factory=threading.Event)
     restored: bool = False
     created_at: int = field(default_factory=lambda: int(time.time() * 1000))
+    error_code: Optional[str] = None
+    error_detail: Optional[str] = None
 
     def snapshot(self):
         return {"id": self.id, "url": self.url, "name": self.options.get("name"),
                 "status": self.status, "fraction": self.fraction, "label": self.label,
+                "error_code": self.error_code, "error_detail": self.error_detail,
                 "path": self.path, "error": self.error,
                 "format_ids": list(self.options.get("format_ids") or []),
                 "format_label": self.options.get("format_label"),
@@ -125,14 +129,17 @@ class JobManager:
                 job.label = "Отменено" if job.status == "cancelled" else "Останавливаем загрузку…"
             return job.snapshot()
 
-    def retry(self, job_id):
+    def retry(self, job_id, *, cookie_browser=None):
         with self._lock:
             job = self._jobs[job_id]
             if job.restored:
                 raise Conflict("Для старой записи получите свежие форматы со страницы")
             if job.status not in {"error", "cancelled"}:
                 raise Conflict("Повтор доступен только после ошибки или отмены")
-            return self.add([job.url], **job.options)[0]
+            options = {**job.options}
+            if cookie_browser is not None:
+                options["cookie_browser"] = cookie_browser
+            return self.add([job.url], **options)[0]
 
     def clear(self):
         with self._lock:
@@ -165,6 +172,8 @@ class JobManager:
             selection = {"format_ids": list(job.options["format_ids"])} if job.options.get("format_ids") else {}
             if job.options.get("stream_kind"):
                 selection["stream_kind"] = job.options["stream_kind"]
+            if job.options.get("cookie_browser"):
+                selection["cookie_browser"] = job.options["cookie_browser"]
             path = self.runner(job.url, folder=self.folder, name=job.options.get("name"),
                                referer=job.options.get("referer"), progress=progress,
                                browser_headers=job.options.get("headers"),
@@ -178,7 +187,9 @@ class JobManager:
                 if isinstance(error, download.Cancelled) or job.cancel.is_set():
                     job.status, job.label, job.error = "cancelled", "Отменено", None
                 else:
-                    job.status, job.label, job.error = "error", "Не удалось скачать", str(error)
+                    job.status, job.label = "error", "Не удалось скачать"
+                    job.error_code, job.error = describe_error(error)
+                    job.error_detail = str(error)[:16384]
 
     def close(self):
         with self._lock:

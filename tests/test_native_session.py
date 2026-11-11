@@ -95,7 +95,7 @@ class NativeSessionTests(unittest.TestCase):
         folder = str(Path(self.folder.name, "other"))
         changed = self.command("configure", settings={"workers": 3, "output_dir": folder})
         self.assertTrue(changed["ok"])
-        self.assertEqual(changed["result"], {"workers": 3, "output_dir": str(Path(folder).resolve())})
+        self.assertEqual(changed["result"], {"workers": 3, "output_dir": str(Path(folder).resolve()), "youtube_browser": "none"})
         self.assertTrue(self.command("clear")["ok"])
         self.assertTrue(saved.exists())
 

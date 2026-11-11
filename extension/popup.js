@@ -43,6 +43,7 @@ function validUrl(value) {
   try { return /^https?:$/.test(new URL(value).protocol); } catch { return false; }
 }
 function hostOf(url) { try { return new URL(url).host; } catch { return ''; } }
+function youtubePage(url) { try { return /(^|\.)youtube\.com$|^youtu\.be$/.test(new URL(url).hostname); } catch { return false; } }
 function filenameOf(url) { try { return decoded(new URL(url).pathname.split('/').pop()); } catch { return ''; } }
 function renderHistoryStatus(status) {
   $('historyStatus').textContent = [status?.warning, status?.error].filter(Boolean).join(' ');
@@ -117,6 +118,8 @@ function renderAnalysis() {
   $('analysisStatus').textContent = analysis.status === 'running' ? 'Получаем метаданные… Загрузка ещё не началась.' : analysis.status === 'cancelling'
     ? 'Останавливаем анализ…' : analysis.status === 'error' ? analysis.error : analysis.status === 'cancelled' ? 'Анализ отменён.' : 'Выберите формат перед скачиванием.';
   $('analysisStatus').classList.toggle('error', analysis.status === 'error');
+  $('analysisDiagnostic').hidden = !analysis.error_detail || analysis.error_detail === analysis.error;
+  $('analysisErrorDetail').textContent = analysis.error_detail || '';
   $('analysisResult').hidden = analysis.status !== 'done';
   const key = `${analysis.id}:${analysis.status}`;
   if (key !== analysisKey && analysis.status === 'done') {
@@ -205,6 +208,11 @@ function renderStreams() {
     const analyse = el('button', 'text-button', 'Качество и звук');
     analyse.disabled = !online || inspectPending || ['running', 'cancelling'].includes(state.analysis?.status);
     analyse.onclick = () => inspect(item, tab?.title, tab?.url);
+    const refresh = el('button', 'text-button', 'Обновить ссылку');
+    refresh.hidden = !youtubePage(tab?.url);
+    refresh.disabled = analyse.disabled;
+    refresh.title = 'Заново получить форматы со страницы YouTube. Выберите формат перед скачиванием.';
+    refresh.onclick = () => inspect({ url: tab.url, source_kind: 'page' }, tab.title, tab.url);
     const details = el('details', 'stream-detail');
     details.dataset.key = group.key;
     details.open = open.has(group.key);
@@ -224,7 +232,7 @@ function renderStreams() {
     const copyButton = el('button', 'text-button', 'Копировать адрес');
     copyButton.onclick = () => copy(item.url).catch(() => notice('Не удалось скопировать. Выделите полный адрес вручную.', true));
     details.append(fullUrl, copyButton);
-    li.append(heading, el('div', 'stream-host', group.host), path, actions, analyse, details);
+    li.append(heading, el('div', 'stream-host', group.host), path, actions, analyse, refresh, details);
     return li;
   }));
   if (focusedUrl) [...$('streams').querySelectorAll('button[data-url]')].find((button) => button.dataset.url === focusedUrl)?.focus({ preventScroll: true });
@@ -233,11 +241,14 @@ function makeJob(job) {
   const root = el('li', 'job'); root.dataset.id = job.id;
   const title = el('div', 'job-title'), source = el('div', 'job-source');
   const status = el('div', 'job-status'), label = el('div', 'job-label'), format = el('div', 'job-format');
+  const diagnostic = el('details', 'explanation'), detail = el('code');
+  diagnostic.append(el('summary', '', 'Техническая причина'), detail);
+  diagnostic.hidden = true;
   const bar = el('div', 'bar'), fill = el('span'); bar.append(fill);
   bar.setAttribute('role', 'progressbar'); bar.setAttribute('aria-valuemin', '0'); bar.setAttribute('aria-valuemax', '100');
   const actions = el('div', 'job-actions');
-  root.append(title, source, format, status, bar, label, actions);
-  return { root, title, source, format, status, label, bar, fill, actions, actionKey: '' };
+  root.append(title, source, format, status, bar, label, diagnostic, actions);
+  return { root, title, source, format, status, label, diagnostic, detail, bar, fill, actions, actionKey: '' };
 }
 function action(text, callback) {
   const button = el('button', 'text-button', text);
@@ -275,19 +286,27 @@ function renderJobs() {
       + (job.status === 'done' && job.file_exists === false ? ' · файл не найден' : '');
     card.label.textContent = job.error || (ACTIVE.has(job.status) ? job.label : job.restored
       ? job.page_retry ? 'Для повтора получим свежие форматы со страницы. Загрузку нужно подтвердить.' : 'Ссылка загрузки не сохранена. Для повтора вставьте свежую ссылку.' : '');
+    card.diagnostic.hidden = !job.error_detail || job.error_detail === job.error;
+    card.detail.textContent = job.error_detail || '';
     card.bar.hidden = !['running', 'cancelling'].includes(job.status);
     card.bar.classList.toggle('indeterminate', percent === null);
     card.bar.setAttribute('aria-label', `Скачивание ${card.title.textContent}`);
     if (percent === null) card.bar.removeAttribute('aria-valuenow');
     else card.bar.setAttribute('aria-valuenow', percent);
     card.fill.style.width = percent === null ? '' : `${percent}%`;
-    const actionKey = `${state.session}:${job.status}:${online}:${job.path || ''}:${job.file_exists}:${job.restored}:${job.page_retry}`;
+    const actionKey = `${state.session}:${job.status}:${online}:${job.path || ''}:${job.file_exists}:${job.restored}:${job.page_retry}:${job.error_code}`;
     if (card.actionKey !== actionKey) {
       card.actionKey = actionKey;
       card.actions.replaceChildren();
       const command = (type) => send({ type, id: job.id, session: state.session });
       if (online && ['queued', 'running'].includes(job.status)) card.actions.append(action('Отменить', () => command('cancel')));
       if (online && !job.restored && ['error', 'cancelled'].includes(job.status)) card.actions.append(action('Повторить', () => command('retry')));
+      if (job.status === 'error' && job.error_code === 'authentication_required' && (youtubePage(job.url) || youtubePage(job.page))) {
+        card.actions.append(action('Сеанс YouTube', async () => { view('settings'); $('youtubeBrowser').focus(); }));
+      }
+      if (online && ['error', 'cancelled'].includes(job.status) && !job.restored && validUrl(job.page)) {
+        card.actions.append(action('Обновить ссылку', () => inspect({ url: job.page, source_kind: 'page' }, job.name || '', job.page)));
+      }
       if (online && job.restored && job.page_retry) card.actions.append(action('Повторить со страницы', async () => {
         await command('inspect_history'); dismissedAnalysis = ''; view('streams');
         notice('Проверяем исходную страницу. Подтвердите формат перед загрузкой.');
@@ -307,6 +326,7 @@ function renderState(next) {
   if (!settingsDirty) {
     $('outputDir').value = state.settings.output_dir || preferences.settings?.output_dir || '';
     $('workers').value = String(state.settings.workers || preferences.settings?.workers || 2);
+    $('youtubeBrowser').value = state.settings.youtube_browser || preferences.settings?.youtube_browser || 'none';
   }
   const folder = state.settings.output_dir || '~/Downloads';
   $('folderLabel').textContent = folder.endsWith('/Downloads') ? 'Загрузки' : folder.split('/').filter(Boolean).pop();
@@ -361,7 +381,7 @@ $('settingsForm').onsubmit = async (event) => {
   event.preventDefault();
   $('saveSettings').disabled = true;
   try {
-    const settings = await send({ type: 'configure', settings: { workers: Number($('workers').value), output_dir: $('outputDir').value.trim() } });
+    const settings = await send({ type: 'configure', settings: { workers: Number($('workers').value), output_dir: $('outputDir').value.trim(), youtube_browser: $('youtubeBrowser').value } });
     settingsDirty = false;
     renderState({ ...state, settings });
     notice('Настройки сохранены');

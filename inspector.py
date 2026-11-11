@@ -12,6 +12,8 @@ import uuid
 
 import download
 from contracts import format_ids_from, valid_url
+from source_auth import is_youtube, ytdlp_auth_args
+from diagnostics import describe_error
 
 TIMEOUT = 30
 MAX_JSON = 8 * 1024 * 1024
@@ -78,11 +80,12 @@ def inspect_source(url, options, cancel, timeout=TIMEOUT):
             return cancel.is_set() or time.monotonic() >= deadline
 
     stop = Stop()
-    headers = download.request_headers(options.get("referer"), options.get("headers")) if options.get("source_kind") != "page" else {
+    headers = download.request_headers(options.get("referer"), options.get("headers")) if options.get("source_kind") != "page" and not is_youtube(url) else {
         **({"Referer": options["referer"]} if options.get("referer") else {}), **(options.get("headers") or {})}
     stream = options.get("source_kind") != "page" and (bool(options.get("stream_kind")) or urllib.parse.urlsplit(url).path.lower().endswith(download.STREAM_EXT))
     command = [executable, "--ignore-config", "--no-playlist", "--simulate", "--dump-single-json",
                "--no-check-formats", "--no-warnings", "--socket-timeout", "10", "--retries", "0"]
+    command += ytdlp_auth_args(url, options.get("cookie_browser", "none"))
     if stream:
         command += ["--impersonate", "chrome"]
     for key, value in headers.items():
@@ -97,7 +100,7 @@ def inspect_source(url, options, cancel, timeout=TIMEOUT):
             raise ValueError("Ожидалось одно видео")
 
     try:
-        download.run_tool(command + ["--", url], collect, stop, max_line_chars=MAX_JSON)
+        download.run_ytdlp_tool(command + ["--", url], collect, stop, max_line_chars=MAX_JSON)
         if not lines:
             raise ValueError("Источник не вернул метаданные")
         result = normalize(json.loads(lines[0]))
@@ -156,7 +159,9 @@ class Inspector:
         except Exception as error:
             with self._lock:
                 cancelled = self._cancel.is_set() or isinstance(error, download.Cancelled)
-                self._state.update(status="cancelled" if cancelled else "error", error=None if cancelled else str(error))
+                code, message = describe_error(error)
+                self._state.update(status="cancelled" if cancelled else "error", error=None if cancelled else message,
+                                   error_code=None if cancelled else code, error_detail=None if cancelled else str(error)[:16384])
 
     def snapshot(self):
         with self._lock:
@@ -169,6 +174,16 @@ class Inspector:
             if self._state and self._state["status"] in ("running", "cancelling"):
                 self._cancel.set()
                 self._state["status"] = "cancelling"
+
+    def invalidate(self):
+        """Смена контекста: старый выбор недействителен, текущий анализ отменяется."""
+        with self._lock:
+            self.stop()
+            # До выхода worker сохраняем cancelling: новый анализ не должен
+            # заменить его state/options/cancel, пока тот ещё может их читать.
+            if not self._state or self._state["status"] != "cancelling":
+                self._state = None
+                self._options = None
 
     def selection(self, identifier, value):
         with self._lock:

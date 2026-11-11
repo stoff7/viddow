@@ -94,6 +94,13 @@ const { extensionPath, openPanel } = require('./extension_browser.cjs');
         job.status = 'done'; job.fraction = 1; job.path = '/tmp/Viddow/Downloads/lesson.mp4';
         globalThis.__nativePort.onMessage.fire(snapshot());
       };
+      globalThis.__nativeYoutubeError = () => {
+        globalThis.__nativeJobs.push({ id: ++globalThis.__nativeSequence,
+          url: 'https://www.youtube.com/watch?v=public_test', page: 'https://www.youtube.com/watch?v=public_test',
+          name: 'YouTube test', status: 'error', error_code: 'authentication_required',
+          error: 'YouTube просит подтвердить сеанс.', error_detail: '[youtube] Sign in to confirm you’re not a bot', path: null });
+        globalThis.__nativePort.onMessage.fire(snapshot());
+      };
     });
     const source = await context.newPage();
     await source.goto(base);
@@ -136,7 +143,7 @@ const { extensionPath, openPanel } = require('./extension_browser.cjs');
     await panel.locator('#workers').selectOption('3');
     await panel.locator('#saveSettings').click();
     await panel.waitForFunction(() => document.querySelector('#message').textContent === 'Настройки сохранены');
-    assert.deepEqual(await worker.evaluate(() => chrome.storage.local.get('settings')), { settings: { workers: 3, output_dir: '/tmp/Viddow/Saved' } });
+    assert.deepEqual(await worker.evaluate(() => chrome.storage.local.get('settings')), { settings: { workers: 3, output_dir: '/tmp/Viddow/Saved', youtube_browser: 'none' } });
     await panel.locator('#theme').click();
     await panel.screenshot({ path: path.join(artifacts, 'extension-settings-dark.png'), fullPage: true });
     assert.equal(await panel.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
@@ -222,6 +229,16 @@ const { extensionPath, openPanel } = require('./extension_browser.cjs');
     await panel.waitForFunction(() => !document.querySelector('#historyStatus').classList.contains('error'));
     const storedHistory = (await worker.evaluate(() => chrome.storage.local.get('history'))).history;
     assert.equal(storedHistory.jobs.at(-1).status, 'done');
+    await worker.evaluate(() => globalThis.__nativeYoutubeError());
+    await panel.locator('.job.error').getByRole('button', { name: 'Сеанс YouTube', exact: true }).click();
+    await panel.locator('#youtubeBrowser').selectOption('vivaldi'); await panel.locator('#saveSettings').click();
+    await panel.waitForFunction(() => document.querySelector('#message').textContent === 'Настройки сохранены');
+    assert.equal((await worker.evaluate(() => chrome.storage.local.get('settings'))).settings.youtube_browser, 'vivaldi');
+    await panel.locator('[data-view=jobs]').click();
+    await panel.locator('.job.error').getByRole('button', { name: 'Обновить ссылку', exact: true }).click();
+    const freshYoutube = await worker.evaluate(() => globalThis.__nativeCalls.at(-1));
+    assert.equal(freshYoutube.command, 'inspect'); assert.equal(freshYoutube.source_kind, 'page');
+    assert.equal(freshYoutube.urls[0], 'https://www.youtube.com/watch?v=public_test');
     assert.deepEqual(errors, []);
     console.log('Extension smoke: PASS (capture, grouping, tabs, commands, settings, reconnect, history migration/corruption/future version/storage error)');
     console.log('Screenshots:', artifacts);

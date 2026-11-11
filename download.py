@@ -23,9 +23,12 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from source_auth import is_youtube, ytdlp_auth_args
+from macos_metadata import complete_download_metadata
 from email.message import Message
 
 CHUNK_SIZE = 64 * 1024
@@ -185,21 +188,29 @@ def stop_process(process):
     process.wait()
 
 
-def run_tool(command, on_line, cancel=None, max_line_chars=None):
+def run_tool(command, on_line, cancel=None, max_line_chars=None, on_idle=None):
     """Запускает ffmpeg/yt-dlp: stdout построчно в on_line, при ошибке — последняя строка stderr."""
     check_cancel(cancel)
     with tempfile.TemporaryFile("w+") as errors:
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=errors, text=True,
                                    start_new_session=os.name == "posix")
         finished = threading.Event()
+        watcher_errors = []
 
         def watch():
             while not finished.wait(0.1):
                 if cancel is not None and cancel.is_set():
                     stop_process(process)
                     return
+                if on_idle:
+                    try:
+                        on_idle()
+                    except Exception as error:
+                        watcher_errors.append(error)
+                        stop_process(process)
+                        return
 
-        watcher = threading.Thread(target=watch, daemon=True) if cancel is not None else None
+        watcher = threading.Thread(target=watch, daemon=True) if cancel is not None or on_idle else None
         if watcher:
             watcher.start()
         try:
@@ -217,11 +228,33 @@ def run_tool(command, on_line, cancel=None, max_line_chars=None):
                 stop_process(process)
             process.stdout.close()
         check_cancel(cancel)
+        if watcher_errors:
+            raise watcher_errors[0]
         if process.returncode:
             errors.seek(0)
             lines = [line for line in errors.read().splitlines() if line.strip()]
             reason = lines[-1] if lines else f"код выхода {process.returncode}"
             raise RuntimeError(f"{os.path.basename(command[0])}: {reason}")
+
+
+def run_ytdlp_tool(command, on_line, cancel=None, **controls):
+    """One ordinary-TLS fallback for an impersonation handshake failure before output."""
+    received_output = False
+
+    def receive(line):
+        nonlocal received_output
+        received_output = True
+        on_line(line)
+
+    try:
+        return run_tool(command, receive, cancel, **controls)
+    except RuntimeError as error:
+        if received_output or "--impersonate" not in command or "curl: (35)" not in str(error).lower():
+            raise
+        check_cancel(cancel)
+        index = command.index("--impersonate")
+        fallback = command[:index] + command[index + 2:]
+        return run_tool(fallback, on_line, cancel, **controls)
 
 
 def request_headers(referer, browser_headers):
@@ -237,7 +270,7 @@ def request_headers(referer, browser_headers):
 
 
 def download(url, folder=DEFAULT_DIR, name=None, referer=None, progress=draw, browser_headers=None,
-             page_url=None, cancel=None, source_kind="auto", format_ids=None, stream_kind=None):
+             page_url=None, cancel=None, source_kind="auto", format_ids=None, stream_kind=None, cookie_browser="none"):
     """Смотрит, что отдал сервер, и выбирает способ — как расширения по заголовкам ответа.
 
     name — заголовок страницы или своё имя; приводится к nice_name() по адресу страницы
@@ -255,13 +288,13 @@ def download(url, folder=DEFAULT_DIR, name=None, referer=None, progress=draw, br
             raise RuntimeError("Для выбора качества нужен yt-dlp: brew install yt-dlp")
         if len(format_ids) > 1 and not shutil.which("ffmpeg"):
             raise RuntimeError("Для объединения видео и звука нужен ffmpeg: brew install ffmpeg")
-        headers = request_headers(referer, browser_headers) if source_kind != "page" else {
+        headers = request_headers(referer, browser_headers) if source_kind != "page" and not is_youtube(url) else {
             **({"Referer": referer} if referer else {}), **(browser_headers or {})}
         return run_ytdlp(url, folder, name, headers, progress,
                          stream=source_kind != "page" and (bool(stream_kind) or urllib.parse.urlparse(url).path.lower().endswith(STREAM_EXT)),
-                         cancel=cancel, format_ids=format_ids)
+                         cancel=cancel, format_ids=format_ids, cookie_browser=cookie_browser)
     if source_kind == "page":
-        return download_page(url, folder, name, referer, progress, browser_headers, cancel)
+        return download_page(url, folder, name, referer, progress, browser_headers, cancel, cookie_browser)
     headers = request_headers(referer, browser_headers)
     url_path = urllib.parse.urlparse(url).path.lower()
     if source_kind == "auto" and (stream_kind or url_path.endswith(STREAM_EXT)):
@@ -275,7 +308,7 @@ def download(url, folder=DEFAULT_DIR, name=None, referer=None, progress=draw, br
         check_cancel(cancel)
         if (source_kind == "auto" and error.code in (401, 403, 405, 429)
                 and not url_path.endswith(FILE_EXT) and shutil.which("yt-dlp")):
-            return download_page(url, folder, name, referer, progress, browser_headers, cancel)
+            return download_page(url, folder, name, referer, progress, browser_headers, cancel, cookie_browser)
         raise
     with response:
         check_cancel(cancel)
@@ -290,7 +323,7 @@ def download(url, folder=DEFAULT_DIR, name=None, referer=None, progress=draw, br
             return save(response, folder, name, progress, cancel)
     if final_url:
         return download_stream(final_url, folder, name, headers, progress, cancel)
-    return download_page(url, folder, name, referer, progress, browser_headers, cancel)
+    return download_page(url, folder, name, referer, progress, browser_headers, cancel, cookie_browser)
 
 
 def save(response, folder, name, progress, cancel=None):
@@ -316,6 +349,7 @@ def save(response, folder, name, progress, cancel=None):
     except BaseException:
         remove_part(part)
         raise
+    complete_download_metadata(path, response.url)
     return path
 
 
@@ -351,6 +385,7 @@ def download_stream_ffmpeg(url, folder, name, headers, progress, cancel=None):
     path = reserve(folder, clean_name(name) + ".mp4")
     part = path + ".part"
     # ffmpeg шлёт эти заголовки и на плейлист, и на каждый кусочек
+    referer = headers.get("Referer")
     headers = "".join(f"{key}: {value}\r\n" for key, value in headers.items())
     duration = None
     info = {}
@@ -381,20 +416,21 @@ def download_stream_ffmpeg(url, folder, name, headers, progress, cancel=None):
     except BaseException:
         remove_part(part)
         raise
+    complete_download_metadata(path, url, referer)
     return path
 
 
-def download_page(url, folder, name, referer, progress, browser_headers=None, cancel=None):
+def download_page(url, folder, name, referer, progress, browser_headers=None, cancel=None, cookie_browser="none"):
     """Страница с плеером: видео не лежит по ссылке, его находит yt-dlp."""
     if not shutil.which("yt-dlp"):
         raise RuntimeError("это страница, а не файл — для неё нужен yt-dlp: brew install yt-dlp")
     # Не навязываем наш User-Agent, но сохраняем явно переданный браузерный контекст.
     headers = {"Referer": referer} if referer else {}
     headers.update(browser_headers or {})
-    return run_ytdlp(url, folder, name, headers, progress, cancel=cancel)
+    return run_ytdlp(url, folder, name, headers, progress, cancel=cancel, cookie_browser=cookie_browser)
 
 
-def run_ytdlp(url, folder, name, headers, progress, stream=False, cancel=None, format_ids=None):
+def run_ytdlp(url, folder, name, headers, progress, stream=False, cancel=None, format_ids=None, cookie_browser="none"):
     """yt-dlp с параллельной загрузкой кусочков потока и заданными заголовками.
 
     stream=True — ссылка на поток, пойманная в браузере:
@@ -408,24 +444,39 @@ def run_ytdlp(url, folder, name, headers, progress, stream=False, cancel=None, f
     path = reserve(folder, clean_name(name), any_ext=True) if name else None
     # % в шаблоне yt-dlp — подстановка, поэтому в своём имени его удваиваем
     template = (os.path.basename(path).replace("%", "%%") if path else "%(title)s") + ".%(ext)s"
+    started = threading.Event()
+    progress_lock = threading.Lock()
+    preparing_since = time.monotonic()
+    last_preparation = 0
+
+    def preparing():
+        nonlocal last_preparation
+        elapsed = int(time.monotonic() - preparing_since)
+        with progress_lock:
+            if not started.is_set() and elapsed > last_preparation:
+                last_preparation = elapsed
+                progress(None, f"Подготовка · {elapsed} с. Ожидаем ответ источника…")
 
     def on_line(line):
         done, total, fragment, fragments = map(number, (line.split() + [None] * 4)[:4])
         if done is None:
             return
-        if total:
-            progress(done / total, megabytes(done, total))
-        elif fragments:
-            # HLS/DASH: общий размер yt-dlp только прикидывает и оценка скачет — считаем по кускам
-            progress(fragment / fragments, f"{megabytes(done)}  кусок {fragment:.0f} из {fragments:.0f}")
-        else:
-            progress(None, megabytes(done))
+        with progress_lock:
+            started.set()
+            if total:
+                progress(done / total, megabytes(done, total))
+            elif fragments:
+                progress(fragment / fragments, f"{megabytes(done)}  кусок {fragment:.0f} из {fragments:.0f}")
+            else:
+                progress(None, megabytes(done))
 
     with tempfile.TemporaryDirectory() as tmp:
         # stdout занят строками прогресса — итоговый путь yt-dlp пишет в файл
         saved_to = os.path.join(tmp, "path")
         command = [shutil.which("yt-dlp"), "--no-playlist", "--no-overwrites", "--quiet", "--progress", "--newline",
                    "--socket-timeout", "30",
+                   "--retries", "1", "--fragment-retries", "2", "--extractor-retries", "1",
+                   "--retry-sleep", "http:2", "--retry-sleep", "fragment:1", "--abort-on-unavailable-fragments",
                    "--progress-template",
                    "download:%(progress.downloaded_bytes)s %(progress.total_bytes)s "
                    "%(progress.fragment_index)s %(progress.fragment_count)s",
@@ -436,6 +487,7 @@ def run_ytdlp(url, folder, name, headers, progress, stream=False, cancel=None, f
                    # она удаляется вместе с tmp, даже если загрузка упала
                    "-P", folder, "-P", f"temp:{tmp}",
                    "-o", template, "--print-to-file", "after_move:filepath", saved_to]
+        command += ytdlp_auth_args(url, cookie_browser)
         if format_ids:
             command += ["--ignore-config", "-f", "+".join(f"all[format_id='{identifier}']" for identifier in format_ids),
                         "--audio-multistreams"]
@@ -454,13 +506,14 @@ def run_ytdlp(url, folder, name, headers, progress, stream=False, cancel=None, f
             progress(None, "подготовка…")
             # видео и звук часто качаются отдельно — тогда полоса пройдёт дважды
             try:
-                run_tool(command + ["--", url], on_line, cancel)
+                run_ytdlp_tool(command + ["--", url], on_line, cancel, on_idle=preparing)
             except Cancelled:
                 # after_move уже мог зафиксировать готовый файл перед отменой.
                 if os.path.isfile(saved_to):
                     with open(saved_to, encoding="utf-8") as saved:
                         completed = saved.read().strip()
                     if os.path.isfile(completed):
+                        complete_download_metadata(completed, url, headers.get("Referer"))
                         return completed
                 raise
             except RuntimeError as e:
@@ -469,7 +522,9 @@ def run_ytdlp(url, folder, name, headers, progress, stream=False, cancel=None, f
                                        "и скачайте пойманный поток (.m3u8/.mpd)") from None
                 raise
             with open(saved_to, encoding="utf-8") as f:
-                return f.read().strip()
+                completed = f.read().strip()
+            complete_download_metadata(completed, url, headers.get("Referer"))
+            return completed
         finally:
             if path:
                 remove_part(path + ".part")  # пустая метка из reserve()

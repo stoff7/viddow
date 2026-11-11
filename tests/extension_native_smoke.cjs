@@ -124,6 +124,16 @@ const alive = pid => { try { process.kill(pid, 0); return true; } catch (error) 
     await panel.locator('.job.done').waitFor();
     const saved = (await state()).jobs[0].path;
     assert.deepEqual(fs.readFileSync(saved), video);
+    if (process.platform === 'darwin') {
+      const attributes = execFileSync('xattr', [saved], { encoding: 'utf8' });
+      if (attributes.split('\n').includes('com.apple.quarantine')) {
+        const quarantine = execFileSync('xattr', ['-p', 'com.apple.quarantine', saved], { encoding: 'utf8' });
+        const [flags, , , event] = quarantine.trim().split(';');
+        assert.ok(parseInt(flags, 16) & 1, 'download must remain quarantined');
+        assert.equal(parseInt(flags, 16) & 0x40, 0, 'must not mark download user-approved');
+        assert.ok(event, 'download event must be registered through macOS URL API');
+      }
+    }
     console.log('PASS real sidePanel → native host → MP4 (byte comparison)');
     assert.equal(await panel.getByRole('button', { name: 'В Finder', exact: true }).isVisible(), true);
     // Finder — настольное приложение пользователя. В обычном прогоне не открываем
@@ -201,7 +211,7 @@ const alive = pid => { try { process.kill(pid, 0); return true; } catch (error) 
     // Media HLS не получает выдуманных альтернатив/классификации по имени.
     await panel.locator('[data-view=streams]').click();
     await panel.locator('#manualUrl').fill(base + '/low.m3u8'); await panel.locator('#inspectLink').click();
-    await waitUntil(async () => (await state()).analysis.status === 'done' && (await state()).analysis.id !== analysis.id, 'Media analysis');
+    await waitUntil(async () => { const current = (await state()).analysis; return current.status === 'done' && current.id !== analysis.id; }, 'Media analysis');
     assert.equal((await state()).analysis.result.hls_kind, 'media');
     assert.equal((await state()).analysis.result.formats.length, 1);
     assert.equal((await send(panel, { type: 'download_selection', analysis_id: analysis.id, format_ids: [low.id], session: initialSession })).ok, false);

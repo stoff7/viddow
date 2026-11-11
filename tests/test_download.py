@@ -78,12 +78,35 @@ class RoutingTests(unittest.TestCase):
 
 
 class TransferTests(unittest.TestCase):
+    def test_tls_fallback_preserves_request_and_stops_after_one_retry(self):
+        command = ['yt-dlp', '--impersonate', 'chrome', '--add-headers', 'Cookie:context',
+                   '--', 'https://example.com/master.m3u8?token=full']
+        with patch('download.run_tool', side_effect=[RuntimeError('curl: (35) SSL_connect'), None]) as run:
+            download.run_ytdlp_tool(command, lambda _: None)
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(run.call_args.args[0], command[:1] + command[3:])
+        with patch('download.run_tool', side_effect=RuntimeError('curl: (35) SSL_connect')) as run:
+            with self.assertRaises(RuntimeError):
+                download.run_ytdlp_tool(command, lambda _: None)
+        self.assertEqual(run.call_count, 2)
+
+    def test_tls_fallback_does_not_restart_partial_transfer_or_other_errors(self):
+        command = ['yt-dlp', '--impersonate', 'chrome', '--', 'https://example.com/video']
+        def partial(command, receive, cancel, **controls):
+            receive('1024 4096')
+            raise RuntimeError('curl: (35) SSL_connect')
+        for effect in (partial, RuntimeError('curl: (28) timed out'), download.Cancelled()):
+            with patch('download.run_tool', side_effect=effect) as run:
+                with self.assertRaises((RuntimeError, download.Cancelled)):
+                    download.run_ytdlp_tool(command, lambda _: None)
+                self.assertEqual(run.call_count, 1)
+
     @patch("download.shutil.which", return_value="yt-dlp")
     def test_explicit_ids_become_literal_filters_and_no_quality_fallback(self, which):
         with tempfile.TemporaryDirectory() as folder:
             saved = Path(folder, "selected.mp4")
             saved.write_bytes(b"done")
-            def finish(command, on_line, cancel):
+            def finish(command, on_line, cancel, **controls):
                 self.assertEqual(command[command.index("-f") + 1], "all[format_id='best']+all[format_id='ru']")
                 self.assertIn("--ignore-config", command)
                 self.assertIn("--audio-multistreams", command)
@@ -171,7 +194,7 @@ class TransferTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             completed = Path(folder, "video.mp4")
 
-            def finish_then_cancel(command, on_line, cancel):
+            def finish_then_cancel(command, on_line, cancel, **controls):
                 completed.write_bytes(b"finished")
                 receipt = command[command.index("--print-to-file") + 2]
                 Path(receipt).write_text(str(completed))

@@ -23,6 +23,7 @@
   <section id="analysisCard" class="analysis-card" aria-label="Выбор качества и звука" hidden>
     <div class="section-heading"><h2>Качество и звук</h2><button id="closeAnalysis" class="text-button" type="button">Закрыть</button></div>
     <p id="analysisSource" class="muted"></p><p id="analysisStatus" role="status"></p>
+    <details id="analysisDiagnostic" class="explanation" hidden><summary>Техническая причина</summary><code id="analysisErrorDetail"></code></details>
     <button id="cancelAnalysis" class="text-button" type="button" hidden>Отменить анализ</button>
     <div id="analysisResult" hidden>
       <img id="videoThumbnail" alt="Обложка видео" referrerpolicy="no-referrer" hidden>
@@ -50,7 +51,10 @@
 </section>
 <section id="settingsView" hidden>
   <h2>Всё под рукой</h2><p class="muted">Настройки для новых загрузок из расширения.</p>
-  <form id="settingsForm" class="settings-form"><label for="outputDir">Папка сохранения</label><input id="outputDir" type="text" placeholder="~/Downloads" spellcheck="false"><p class="field-note">Полный путь к папке на компьютере.</p><label for="workers">Одновременно скачивать</label><select id="workers"><option value="1">1 видео</option><option value="2">2 видео</option><option value="3">3 видео</option><option value="4">4 видео</option><option value="5">5 видео</option><option value="6">6 видео</option><option value="7">7 видео</option><option value="8">8 видео</option></select><p class="field-note">Остальные задачи подождут в очереди.</p><button id="saveSettings" class="button primary wide" type="submit">Сохранить настройки</button><p id="settingsHint" class="field-note"></p></form>
+  <form id="settingsForm" class="settings-form"><label for="outputDir">Папка сохранения</label><input id="outputDir" type="text" placeholder="~/Downloads" spellcheck="false"><p class="field-note">Полный путь к папке на компьютере.</p><label for="workers">Одновременно скачивать</label><select id="workers"><option value="1">1 видео</option><option value="2">2 видео</option><option value="3">3 видео</option><option value="4">4 видео</option><option value="5">5 видео</option><option value="6">6 видео</option><option value="7">7 видео</option><option value="8">8 видео</option></select><p class="field-note">Остальные задачи подождут в очереди.</p>
+    <label for="youtubeBrowser">Сеанс YouTube</label><select id="youtubeBrowser"><option value="none">Не использовать вход браузера</option><option value="vivaldi">Vivaldi</option><option value="chrome">Google Chrome</option><option value="chromium">Chromium</option><option value="firefox">Firefox</option><option value="edge">Microsoft Edge</option><option value="brave">Brave</option><option value="safari">Safari</option><option value="opera">Opera</option></select>
+    <p class="field-note">Для YouTube используем вход последнего активного профиля выбранного браузера. Может потребоваться разрешение macOS на доступ к его сеансу. Cookies не экспортируются в файл и не сохраняются в истории. После выбора повторите анализ или загрузку.</p>
+    <button id="saveSettings" class="button primary wide" type="submit">Сохранить настройки</button><p id="settingsHint" class="field-note"></p></form>
   <div class="tools-card"><h3>Локальный помощник</h3><p id="toolsStatus">Проверяем инструменты…</p><p class="muted">Если помощник не найден, выполните в папке проекта:</p><code>python3 install_native_host.py</code><p class="muted">Для страниц и объединения дорожек на macOS:</p><code>brew install yt-dlp ffmpeg</code></div>
 </section>
 </main>
