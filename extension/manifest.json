@@ -1,10 +1,12 @@
 {
   "manifest_version": 3,
-  "name": "Video Links Catcher",
-  "version": "2.0",
-  "description": "Ловит HLS/DASH-потоки, которые запрашивает страница, и качает их через download.py.",
-  "permissions": ["webRequest", "storage", "nativeMessaging"],
+  "name": "Viddow — видео под рукой",
+  "version": "3.0.0",
+  "minimum_chrome_version": "116",
+  "description": "Скачивание видео со страницы и по ссылке, найденные потоки, очередь и настройки в боковой панели.",
+  "permissions": ["webRequest", "storage", "nativeMessaging", "sidePanel"],
   "host_permissions": ["<all_urls>"],
-  "background": { "service_worker": "background.js" },
-  "action": { "default_title": "Найденные потоки", "default_popup": "popup.html" }
+  "background": { "service_worker": "background.js", "type": "module" },
+  "side_panel": { "default_path": "popup.html" },
+  "action": { "default_title": "Открыть Viddow" }
 }

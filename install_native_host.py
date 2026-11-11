@@ -9,6 +9,7 @@ ID распакованного расширения Chromium выводит и�
 загрузите расширение заново и запустите этот скрипт ещё раз.
 """
 import hashlib
+import argparse
 import json
 import os
 import stat
@@ -34,6 +35,9 @@ def extension_id(path):
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--user-data-dir", help="Зарегистрировать хост только в указанном каталоге данных браузера")
+    args = parser.parse_args()
     ext_id = extension_id(os.path.join(HERE, "extension"))
     wrapper = os.path.join(HERE, "native_host.sh")
     for script in (wrapper, os.path.join(HERE, "native_host.py")):
@@ -47,9 +51,10 @@ def main():
     }
 
     installed = []
-    for title, folder in BROWSERS.items():
-        profile = os.path.join(SUPPORT, folder)
-        if not os.path.isdir(profile):
+    targets = {"Тестовый профиль": os.path.abspath(os.path.expanduser(args.user_data_dir))} if args.user_data_dir else {
+        title: os.path.join(SUPPORT, folder) for title, folder in BROWSERS.items()}
+    for title, profile in targets.items():
+        if not args.user_data_dir and not os.path.isdir(profile):
             continue
         hosts = os.path.join(profile, "NativeMessagingHosts")
         os.makedirs(hosts, exist_ok=True)

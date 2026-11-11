@@ -1,124 +1,166 @@
-// Ловит HLS/DASH-плейлисты, которые запрашивает плеер, — как Video DownloadHelper:
-// HTML не разбираем, смотрим сетевые ответы вкладки по Content-Type и адресу.
-// Найденное хранится по вкладкам в storage.session: service worker засыпает и память теряет.
+import { rememberStream, groupStreams } from './stream-model.mjs';
+
+const HOST = 'local.video_downloader';
 const STREAM_TYPE = /mpegurl|dash\+xml/i;
 const STREAM_PATH = /\.(m3u8|mpd)$/i;
-const MAX_PER_TAB = 30;
-
-const key = (tabId) => `tab_${tabId}`;
-
-// Заголовки, с которыми браузер запросил поток. Подписанные ссылки CDN бывают привязаны
-// к User-Agent и Referer — ffmpeg должен прийти с теми же. Служебные не нужны.
 const SKIP_HEADER = /^(range|accept-encoding|host|connection|content-length|if-.*)$/i;
-const sentHeaders = new Map(); // requestId -> {имя: значение}, живёт до ответа
-
-chrome.webRequest.onSendHeaders.addListener((details) => {
-  if (details.tabId < 0) return;
-  sentHeaders.set(details.requestId, Object.fromEntries(details.requestHeaders
-    .filter((h) => h.value !== undefined && !SKIP_HEADER.test(h.name))
-    .map((h) => [h.name, h.value])));
-}, { urls: ["<all_urls>"], types: ["xmlhttprequest", "media", "other"] },
-// extraHeaders — без него Chrome не показывает Referer и Cookie
-["requestHeaders", "extraHeaders"]);
-
-chrome.webRequest.onErrorOccurred.addListener((details) => sentHeaders.delete(details.requestId),
-  { urls: ["<all_urls>"] });
-
-// Обработчики асинхронные и могут перемежаться — изменения хранилища выполняем строго по очереди.
-// change получает текущий список и возвращает новый (или тот же — тогда ничего не пишем).
+const sentHeaders = new Map();
+const key = (tabId) => `tab_${tabId}`;
 let chain = Promise.resolve();
 function update(storageKey, change, afterWrite) {
-  chain = chain.then(async () => {
-    const value = (await chrome.storage.session.get(storageKey))[storageKey] || [];
+  const operation = chain.then(async () => {
+    const value = (await chrome.storage.session.get(storageKey))[storageKey];
     const next = change(value);
-    if (next === value) return;
     await chrome.storage.session.set({ [storageKey]: next });
     await afterWrite?.(next);
-  }).catch(console.error);
+    return next;
+  });
+  chain = operation.catch(console.error);
+  return operation;
 }
-
 function updateTab(tabId, change) {
-  update(key(tabId), change,
-    (items) => chrome.action.setBadgeText({ tabId, text: items.length ? String(items.length) : "" }));
+  return update(key(tabId), (value) => change(value || []), (items) =>
+    chrome.action.setBadgeText({ tabId, text: items.length ? String(groupStreams(items).length) : '' }));
 }
-
+chrome.webRequest.onSendHeaders.addListener((details) => {
+  if (details.tabId < 0) return;
+  sentHeaders.set(details.requestId, Object.fromEntries((details.requestHeaders || [])
+    .filter((header) => header.value !== undefined && !SKIP_HEADER.test(header.name))
+    .map((header) => [header.name, header.value])));
+}, { urls: ['<all_urls>'], types: ['xmlhttprequest', 'media', 'other'] }, ['requestHeaders', 'extraHeaders']);
+chrome.webRequest.onErrorOccurred.addListener((details) => sentHeaders.delete(details.requestId), { urls: ['<all_urls>'] });
+chrome.webRequest.onBeforeRedirect.addListener((details) => sentHeaders.delete(details.requestId), { urls: ['<all_urls>'] });
 chrome.webRequest.onHeadersReceived.addListener((details) => {
   const headers = sentHeaders.get(details.requestId);
   sentHeaders.delete(details.requestId);
   if (details.tabId < 0) return;
-  if (details.type === "main_frame") { // новая страница — старые находки не нужны
-    updateTab(details.tabId, (items) => (items.length ? [] : items));
-    return;
-  }
-  const contentType = details.responseHeaders
-    ?.find((h) => h.name.toLowerCase() === "content-type")?.value || "";
+  const contentType = details.responseHeaders?.find((header) => header.name.toLowerCase() === 'content-type')?.value || '';
   const path = new URL(details.url).pathname;
-  if (!STREAM_TYPE.test(contentType) && !STREAM_PATH.test(path)) return;
-
-  const item = {
-    url: details.url,
-    kind: /dash|\.mpd$/i.test(contentType + path) ? "DASH" : "HLS",
-    // origin фрейма, который запросил поток: плеер часто во iframe, и CDN проверяет именно его
-    referer: details.initiator ? details.initiator + "/" : "",
-    headers, // если service worker перезапускался между запросом и ответом — undefined, хватит referer
-  };
-  updateTab(details.tabId, (items) =>
-    items.some((i) => i.url === item.url) || items.length >= MAX_PER_TAB ? items : [...items, item]);
-}, { urls: ["<all_urls>"], types: ["main_frame", "xmlhttprequest", "media", "other"] }, ["responseHeaders"]);
-
-chrome.tabs.onRemoved.addListener((tabId) => chrome.storage.session.remove(key(tabId)));
-
-// ── Загрузки ────────────────────────────────────────────────────────────────────────────────
-// Качает native_host.py (download.py): браузер запускает его на каждую загрузку, сервер не нужен.
-// Пока порт к хосту открыт, Chrome не усыпляет service worker. Состояние — в storage.session "jobs",
-// его читает popup.
-const HOST = "local.video_downloader"; // то же имя — в install_native_host.py
-const MAX_JOBS = 30;
-const ports = new Map(); // id загрузки -> порт к её хосту
-
-const patchJob = (id, fields) =>
-  update("jobs", (jobs) => jobs.map((j) => (j.id === id ? { ...j, ...fields } : j)));
-
-function hostError(reason) {
-  if (/not found|forbidden/i.test(reason)) {
-    return "Хост не установлен — запустите в папке downloader: python3 install_native_host.py";
-  }
-  return reason || "загрузка прервалась";
-}
-
-function startDownload({ item, title, page }) {
-  const id = crypto.randomUUID();
-  update("jobs", (jobs) => [{ id, url: item.url, title, status: "running", fraction: null,
-    label: "запуск…" }, ...jobs].slice(0, MAX_JOBS));
-
-  const port = chrome.runtime.connectNative(HOST);
-  ports.set(id, port);
-  port.onMessage.addListener((msg) => {
-    if (msg.type === "progress") patchJob(id, { fraction: msg.fraction, label: msg.label });
-    else if (msg.type === "done") patchJob(id, { status: "done", fraction: 1, path: msg.path });
-    else if (msg.type === "error") patchJob(id, { status: "error", error: msg.error });
-  });
-  // Хост закрывается и после done/error — тогда статус уже не running и ничего не меняем.
-  port.onDisconnect.addListener(() => {
-    ports.delete(id);
-    const reason = chrome.runtime.lastError?.message;
-    update("jobs", (jobs) => jobs.map((j) =>
-      (j.id === id && j.status === "running" ? { ...j, status: "error", error: hostError(reason) } : j)));
-  });
-  // Имя файла делает download.nice_name() по сырому заголовку и адресу вкладки.
-  port.postMessage({ type: "download", url: item.url, name: title, page,
-    referer: item.referer, headers: item.headers });
-}
-
-function cancelDownload(id) {
-  // закрытый порт закрывает stdin хоста — он остановит yt-dlp/ffmpeg и уберёт недокачанное
-  ports.get(id)?.disconnect();
-  ports.delete(id);
-  patchJob(id, { status: "cancelled" });
-}
-
-chrome.runtime.onMessage.addListener((msg) => {
-  if (msg.type === "download") startDownload(msg);
-  else if (msg.type === "cancel") cancelDownload(msg.id);
-  else if (msg.type === "clear") update("jobs", (jobs) => jobs.filter((j) => j.status === "running"));
+  if (details.statusCode >= 400 || (!STREAM_TYPE.test(contentType) && !STREAM_PATH.test(path))) return;
+  const item = { url: details.url, kind: /dash|\.mpd$/i.test(contentType + path) ? 'DASH' : 'HLS',
+    referer: details.initiator && /^https?:/.test(details.initiator) ? details.initiator + '/' : '',
+    headers, lastSeen: details.timeStamp || Date.now() };
+  updateTab(details.tabId, (items) => rememberStream(items, item));
+}, { urls: ['<all_urls>'], types: ['xmlhttprequest', 'media', 'other'] }, ['responseHeaders']);
+// Чистим до запросов нового документа, чтобы поздний ответ навигации не удалял новые потоки.
+chrome.webRequest.onBeforeRequest.addListener((details) => {
+  if (details.tabId >= 0) updateTab(details.tabId, () => []);
+}, { urls: ['<all_urls>'], types: ['main_frame'] });
+chrome.tabs.onRemoved.addListener((tabId) => {
+  chain = chain.then(() => chrome.storage.session.remove(key(tabId))).catch(console.error);
 });
+
+// Один хост хранит очередь всех вкладок. Он живёт независимо от открытого UI.
+let port = null, connecting = null, session = null;
+const pending = new Map();
+function hostError(reason) {
+  if (/not found|forbidden|not registered/i.test(reason || '')) {
+    return 'Помощник не подключён. Выполните в папке проекта: python3 install_native_host.py';
+  }
+  return reason || 'Связь с загрузчиком прервалась. Подключитесь снова.';
+}
+async function ensureHost() {
+  if (connecting) return connecting;
+  if (port && session) return;
+  connecting = (async () => {
+    const { settings = {} } = await chrome.storage.local.get('settings');
+    await update('host', () => ({ status: 'connecting', error: null }));
+    return new Promise((resolve, reject) => {
+      const current = chrome.runtime.connectNative(HOST);
+      port = current;
+      let ready = false;
+      const timeout = setTimeout(() => {
+        disconnected('Помощник не ответил. Проверьте его установку.');
+        current.disconnect();
+      }, 10000);
+      let ended = false;
+      const disconnected = (reason) => {
+        if (ended) return;
+        ended = true;
+        clearTimeout(timeout);
+        if (port === current) { port = null; session = null; }
+        const error = hostError(reason);
+        if (!ready) reject(new Error(error));
+        for (const [id, request] of pending) {
+          clearTimeout(request.timer); request.reject(new Error(error)); pending.delete(id);
+        }
+        update('host', () => ({ status: 'offline', error }));
+        update('nativeState', (state) => state ? { ...state, jobs: state.jobs.map((job) =>
+          ['queued', 'running', 'cancelling'].includes(job.status)
+            ? { ...job, status: 'error', error: 'Загрузчик отключён. Добавьте ссылку заново после подключения.' } : job) } : null);
+      };
+      current.onMessage.addListener((message) => {
+        if (ended) return;
+        if (message.type === 'ready' || message.type === 'state') {
+          if (message.type === 'ready') {
+            if (message.protocol !== 2 || typeof message.session !== 'string' || !message.session) {
+              disconnected('Помощник использует несовместимый протокол. Обновите файлы проекта.');
+              current.disconnect();
+              return;
+            }
+            session = message.session;
+          } else if (!ready || message.session !== session) return;
+          update('nativeState', () => message);
+          update('host', () => ({ status: 'online', error: null }));
+          if (message.type === 'ready') {
+            ready = true; clearTimeout(timeout); resolve();
+          }
+        } else if (message.type === 'reply') {
+          const request = pending.get(message.request_id);
+          if (!request) return;
+          clearTimeout(request.timer); pending.delete(message.request_id);
+          if (message.ok) request.resolve(message.result);
+          else request.reject(new Error(message.error));
+        } else if (message.type === 'error') {
+          disconnected(message.error); current.disconnect();
+        }
+      });
+      current.onDisconnect.addListener(() => disconnected(chrome.runtime.lastError?.message));
+      current.postMessage({ type: 'session', settings });
+    });
+  })();
+  try { return await connecting; }
+  catch (error) {
+    await update('host', () => ({ status: 'offline', error: hostError(error.message) }));
+    throw error;
+  }
+  finally { connecting = null; }
+}
+async function command(message) {
+  await ensureHost();
+  if (message.session && message.session !== session) throw new Error('Сессия загрузок изменилась. Добавьте ссылку заново.');
+  return new Promise((resolve, reject) => {
+    const request_id = crypto.randomUUID();
+    const timer = setTimeout(() => {
+      pending.delete(request_id);
+      reject(new Error('Ответ задерживается. Проверьте список загрузок перед повтором.'));
+    }, 12000);
+    pending.set(request_id, { resolve, reject, timer });
+    try { port.postMessage({ ...message, session, request_id }); }
+    catch (error) { clearTimeout(timer); pending.delete(request_id); reject(error); }
+  });
+}
+async function handle(message) {
+  if (message.type === 'connect') { await ensureHost(); return {}; }
+  if (message.type === 'download') {
+    const item = message.item;
+    return command({ command: 'download', urls: [item.url], name: message.title || '',
+      page: message.page || '', referer: item.referer || '', headers: item.headers || {},
+      source_kind: item.source_kind || 'auto' });
+  }
+  if (['cancel', 'retry', 'clear', 'reveal'].includes(message.type)) {
+    return command({ command: message.type, id: message.id, session: message.session });
+  }
+  if (message.type === 'configure') {
+    const settings = await command({ command: 'configure', settings: message.settings });
+    await chrome.storage.local.set({ settings });
+    return settings;
+  }
+  throw new Error('Неизвестная команда');
+}
+chrome.runtime.onMessage.addListener((message, sender, respond) => {
+  if (sender.id !== chrome.runtime.id) return;
+  handle(message).then((result) => respond({ ok: true, result }), (error) => respond({ ok: false, error: error.message }));
+  return true;
+});
+if (chrome.sidePanel) chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(console.error);

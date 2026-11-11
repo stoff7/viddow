@@ -1,18 +1,28 @@
 #!/usr/bin/env python3
-"""Native Messaging-хост для extension/: браузер сам запускает его на каждую загрузку — без server.py.
+"""Native Messaging-хост расширения: браузер запускает один процесс на канал, без server.py.
 
 Протокол Chrome: сообщения в stdin/stdout, каждое — 4 байта длины (little-endian) + JSON.
+Session v2 (основная панель):
+    ← {"type": "session", "settings": {"workers": 2, "output_dir": "~/Downloads"}}
+    → {"type": "ready", "protocol": 2, "session", "jobs", "settings", "tools"}
+    ← {"command": "download|cancel|retry|clear|configure|reveal", "request_id", "session", ...}
+    → {"type": "reply", "request_id", "ok", "result" | "error"}
+    → {"type": "state", "session", "jobs", "settings", "tools"} при изменении состояния
+Команды требуют актуальный session ID. Очередь общая для вкладок расширения,
+история только в памяти. Закрытие панели не закрывает канал фонового процесса.
+
+Совместимые одиночные команды (прежний клиент, отдельный канал на действие):
     ← {"type": "download", "url", "name", "page", "referer", "headers"}
     → {"type": "progress", "fraction", "label"} … и в конце {"type": "done", "path"} или {"type": "error", "error"}
     ← {"type": "reveal", "path"} → показать готовый файл в Finder, ответ {"type": "ok"}
-Расширение закрыло порт (отмена, браузер закрыт) → stdin закрывается → хост останавливает
+Расширение закрыло порт (браузер закрыт/расширение перезагружено) → EOF → хост останавливает
 yt-dlp/ffmpeg, а finally в download.py убирают недокачанное.
 
-Регистрация в браузере: python3 install_native_host.py. Запускается через native_host.sh.
+Отмена отдельной задачи session v2 не закрывает канал. Полный контракт:
+docs/extension-control.md. Регистрация: python3 install_native_host.py; запуск через native_host.sh.
 """
 import json
 import os
-import signal
 import struct
 import subprocess
 import sys
@@ -29,15 +39,13 @@ send_lock = threading.Lock()
 cancelled = threading.Event()
 
 
-class Cancelled(Exception):
-    pass
-
-
 def read_message():
     header = sys.stdin.buffer.read(4)
     if len(header) < 4:
         return None
     (length,) = struct.unpack("<I", header)
+    if not 0 < length <= 1024 * 1024:
+        raise ValueError("Сообщение слишком большое")
     return json.loads(sys.stdin.buffer.read(length))
 
 
@@ -51,7 +59,7 @@ def send(message):
         pass  # расширение уже закрыло порт
 
 
-def stop_on_disconnect(own_group):
+def stop_on_disconnect():
     """После первого сообщения расширение молчит, так что конец stdin — это отмена или закрытый браузер.
 
     Читаем дескриптор напрямую: буферизованный sys.stdin держит блокировку, и при выходе
@@ -59,9 +67,7 @@ def stop_on_disconnect(own_group):
     """
     while os.read(0, 65536):
         pass
-    cancelled.set()  # прямую загрузку (urllib, в этом процессе) остановит колбэк progress
-    if own_group:
-        os.killpg(0, signal.SIGTERM)  # yt-dlp/ffmpeg и их дочерние процессы
+    cancelled.set()  # Общее ядро останавливает свою группу yt-dlp/ffmpeg и удаляет временные файлы.
 
 
 def reveal(path):
@@ -80,7 +86,7 @@ def run_download(message):
     def progress(fraction, label):
         nonlocal last_sent
         if cancelled.is_set():
-            raise Cancelled
+            raise download.Cancelled
         now = time.monotonic()
         if now - last_sent >= SEND_EVERY:
             last_sent = now
@@ -89,7 +95,8 @@ def run_download(message):
     return download.download(message["url"], name=message.get("name") or None,
                              referer=message.get("referer") or None, progress=progress,
                              browser_headers=message.get("headers") or None,
-                             page_url=message.get("page") or None)
+                             page_url=message.get("page") or None, cancel=cancelled,
+                             source_kind=message.get("source_kind", "auto"))
 
 
 def main():
@@ -97,21 +104,17 @@ def main():
     if not message:
         return
     try:
+        if message.get("type") == "session":
+            from native_session import Session
+            Session(message.get("settings") or {}, send).run(read_message)
+            return
         if message.get("type") == "reveal":
             reveal(message.get("path", ""))
             send({"type": "ok"})
             return
-        # Своя группа процессов: при отмене гасим её целиком, не задевая браузер.
-        # Сам хост SIGTERM переживает (обработчик, а не SIG_IGN — тот унаследовали бы дети).
-        try:
-            os.setpgrp()
-        except OSError:
-            pass
-        own_group = os.getpgrp() == os.getpid()
-        signal.signal(signal.SIGTERM, lambda *_: None)
-        threading.Thread(target=stop_on_disconnect, args=(own_group,), daemon=True).start()
+        threading.Thread(target=stop_on_disconnect, daemon=True).start()
         send({"type": "done", "path": run_download(message)})
-    except Cancelled:
+    except download.Cancelled:
         pass
     except Exception as e:
         if not cancelled.is_set():
