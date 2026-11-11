@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.DS_Store
+.env
+.env.*
+*.part
+
+# Локальные ссылки на видео не публикуются.
+urls.txt

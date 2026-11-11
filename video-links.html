@@ -1,0 +1,464 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Видео-ссылки из HTML</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --surface: #fff; --text: #1a1a1a; --muted: #6b7079;
+    --border: #e3e5ea; --accent: #2563eb; --accent-text: #fff;
+    --ok: #15803d; --warn: #b45309; --danger: #b91c1c;
+    --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #111318; --surface: #1a1d24; --text: #e8eaee; --muted: #9aa0ab;
+      --border: #2c303a; --accent: #4f8bff; --accent-text: #fff;
+      --ok: #4ade80; --warn: #fbbf24; --danger: #f87171;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  main { max-width: 960px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 20px; }
+  .card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 12px; padding: 16px; margin-bottom: 16px;
+  }
+  label { display: block; font-weight: 600; margin-bottom: 6px; }
+  textarea, input[type=url] {
+    width: 100%; font: 13px var(--mono); color: var(--text); background: var(--bg);
+    border: 1px solid var(--border); border-radius: 8px; padding: 10px;
+  }
+  textarea { height: 180px; resize: vertical; }
+  textarea.drag { border-color: var(--accent); outline: 2px dashed var(--accent); }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 10px; }
+  .row input[type=url] { flex: 1 1 260px; }
+  button, .btn {
+    font: inherit; font-weight: 600; cursor: pointer; border-radius: 8px;
+    border: 1px solid var(--border); background: var(--surface); color: var(--text);
+    padding: 7px 12px; white-space: nowrap;
+  }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+  button:disabled { opacity: .45; cursor: default; }
+  .toolbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
+  .toolbar .count { margin-right: auto; font-weight: 600; }
+  ul { list-style: none; margin: 0; padding: 0; }
+  li {
+    display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: start;
+    padding: 10px 0; border-top: 1px solid var(--border);
+  }
+  li:first-child { border-top: 0; }
+  .url { font: 12.5px var(--mono); word-break: break-all; }
+  .meta { color: var(--muted); font-size: 12px; margin-top: 3px; }
+  .badge {
+    display: inline-block; font: 600 11px var(--mono); padding: 1px 6px; border-radius: 4px;
+    border: 1px solid currentColor; margin-right: 6px; color: var(--ok);
+  }
+  .badge.stream, .badge.embed { color: var(--warn); }
+  .actions { display: flex; gap: 6px; }
+  .actions button { padding: 4px 8px; font-size: 12px; }
+  pre {
+    font: 12.5px var(--mono); background: var(--bg); border: 1px solid var(--border);
+    border-radius: 8px; padding: 10px; white-space: pre-wrap; word-break: break-all; margin: 10px 0 0;
+  }
+  .note { color: var(--muted); font-size: 12.5px; margin-top: 8px; }
+  .empty { color: var(--muted); text-align: center; padding: 16px 0; }
+  .toast {
+    position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
+    background: var(--text); color: var(--bg); padding: 8px 14px; border-radius: 8px;
+    font-weight: 600; opacity: 0; transition: opacity .2s; pointer-events: none;
+  }
+  .toast.show { opacity: 1; }
+  .job { display: block; }
+  .job-head { display: flex; gap: 8px; align-items: baseline; }
+  .job-head .url { flex: 1; min-width: 0; }
+  .job-status { font-size: 12px; font-weight: 600; color: var(--muted); white-space: nowrap; }
+  .job.done .job-status { color: var(--ok); }
+  .job.error .job-status, .job-error { color: var(--danger); }
+  .bar { height: 8px; border-radius: 4px; background: var(--bg); border: 1px solid var(--border); overflow: hidden; margin-top: 6px; }
+  .bar span { display: block; height: 100%; width: 0; background: var(--accent); transition: width .3s; }
+  .job.done .bar span { background: var(--ok); }
+  /* размер неизвестен — бегущая полоска вместо процентов */
+  .bar.indeterminate span { width: 30%; animation: slide 1.2s ease-in-out infinite; }
+  @keyframes slide { from { transform: translateX(-100%); } to { transform: translateX(340%); } }
+  @media (prefers-reduced-motion: reduce) { .bar.indeterminate span { animation: none; width: 100%; opacity: .35; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>Видео-ссылки из HTML</h1>
+  <p class="sub">Введите адрес страницы и нажмите «Загрузить» — или вставьте исходный код (Ctrl+U → Ctrl+A → Ctrl+C), или перетащите .html-файл.</p>
+
+  <section class="card">
+    <label for="base">Адрес страницы</label>
+    <div class="row" style="margin-top:0">
+      <input id="base" type="url" placeholder="https://example.com/video-page">
+      <button id="load" class="primary">Загрузить</button>
+    </div>
+    <p class="note" id="status"></p>
+    <label for="src" style="margin-top:12px">HTML-код</label>
+    <textarea id="src" spellcheck="false" placeholder="<html>…</html>"></textarea>
+    <div class="row">
+      <label class="btn" style="margin:0">Открыть файл<input id="file" type="file" accept=".html,.htm,.txt" hidden></label>
+      <button id="clear">Очистить</button>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="toolbar">
+      <span class="count" id="count">Ссылок нет</span>
+      <label style="margin:0;font-weight:400"><input type="checkbox" id="all"> выбрать все</label>
+      <button id="copySel" disabled>Копировать</button>
+      <button id="cmd" disabled>Команда для download.py</button>
+      <button id="dl" class="primary" disabled>Скачать</button>
+    </div>
+    <ul id="list"><li class="empty" style="display:block">Здесь появятся найденные ссылки</li></ul>
+    <div id="cmdBox" hidden>
+      <pre id="cmdText"></pre>
+      <div class="row"><button id="copyCmd">Копировать команду</button></div>
+      <p class="note" id="cmdNote"></p>
+    </div>
+  </section>
+
+  <section class="card" id="jobsCard" hidden>
+    <div class="toolbar"><span class="count">Загрузки → ~/Downloads</span></div>
+    <ul id="jobs"></ul>
+  </section>
+
+  <p class="note">
+    «Скачать» работает, когда страница открыта через <code>python3 server.py</code>; файлы попадают в ~/Downloads.
+    Способ выбирается сам:
+    <b>прямые</b> (MP4, WEBM…) — без зависимостей;
+    <b>HLS/DASH</b> (.m3u8, .mpd) — склеивает через <code>ffmpeg</code>;
+    <b>встроенные плееры</b> (YouTube, VK, Rutube…) — через <code>yt-dlp</code>.
+    Адрес страницы уходит как Referer — без него многие видеосерверы отвечают 403.
+  </p>
+</main>
+<div class="toast" id="toast"></div>
+
+<script>
+const VIDEO_EXT = ["mp4", "m4v", "webm", "mov", "mkv", "avi", "flv", "ogv", "3gp", "wmv", "ts", "m3u8", "mpd"];
+const STREAM_EXT = ["m3u8", "mpd"];
+const EMBED_HOSTS = /(youtube\.com|youtube-nocookie\.com|youtu\.be|vimeo\.com|rutube\.ru|vk\.com|vkvideo\.ru|ok\.ru|dailymotion\.com|dzen\.ru)/i;
+// iframe с неизвестного сайта считаем плеером, если адрес на него похож
+const EMBED_HINT = /(embed|player|video|movie|film|serial|episode|stream)/i;
+const NOT_PLAYER = /(recaptcha|captcha|googletagmanager|doubleclick|googlesyndication|facebook\.com\/plugins|platform\.twitter|disqus|yandex\.ru\/(ads|metrika))/i;
+const URL_IN_TEXT = /https?:\/\/[^\s"'<>`\\)\]}]+/gi;
+
+const $ = (id) => document.getElementById(id);
+let found = []; // { url, kind, sources:Set }
+let page = { title: "", base: "" }; // для имени файла и Referer в команде
+// Открыта через server.py (http) — можно грузить чужие сайты и качать. Открыта как файл — нет.
+const viaServer = location.protocol !== "file:";
+
+function extOf(url) {
+  try {
+    const m = new URL(url).pathname.toLowerCase().match(/\.([a-z0-9]{2,4})$/);
+    return m ? m[1] : "";
+  } catch { return ""; }
+}
+
+function resolve(raw, base) {
+  if (!raw) return null;
+  raw = raw.trim().replace(/&amp;/g, "&");
+  if (/^(blob:|data:|javascript:|#)/i.test(raw)) return null;
+  try { return new URL(raw, base || undefined).href; } catch { return null; }
+}
+
+function guessBase(doc) {
+  const el = doc.querySelector("base[href], link[rel=canonical], meta[property='og:url']");
+  return el ? (el.getAttribute("href") || el.getAttribute("content")) : "";
+}
+
+function extract(html, userBase) {
+  const doc = new DOMParser().parseFromString(html, "text/html"); // инертный: скрипты не выполняются
+  let base = userBase;
+  if (!base) { try { base = new URL(guessBase(doc)).href; } catch { base = ""; } }
+
+  const map = new Map();
+  const add = (raw, source, kind) => {
+    const url = resolve(raw, base);
+    if (!url || !/^https?:/i.test(url)) return;
+    const ext = extOf(url);
+    kind = kind || (STREAM_EXT.includes(ext) ? "stream" : "direct");
+    if (!map.has(url)) map.set(url, { url, kind, ext, sources: new Set() });
+    map.get(url).sources.add(source);
+  };
+  const isVideo = (u) => VIDEO_EXT.includes(extOf(resolve(u, base) || ""));
+
+  doc.querySelectorAll("video[src]").forEach((el) => add(el.getAttribute("src"), "<video>"));
+  doc.querySelectorAll("video source[src], source[type^='video'], source[type*='mpegurl' i]")
+    .forEach((el) => add(el.getAttribute("src"), "<source>"));
+  doc.querySelectorAll("[data-src], [data-video], [data-video-src], [data-url]").forEach((el) => {
+    for (const a of ["data-src", "data-video", "data-video-src", "data-url"]) {
+      const v = el.getAttribute(a);
+      if (v && isVideo(v)) add(v, a);
+    }
+  });
+  doc.querySelectorAll("meta[property^='og:video'], meta[name^='twitter:player:stream']").forEach((el) => {
+    const v = el.getAttribute("content");
+    if (v && /^(https?:|\/)/i.test(v)) add(v, el.getAttribute("property") || el.getAttribute("name"),
+      isVideo(v) ? null : "embed");
+  });
+  doc.querySelectorAll("a[href]").forEach((el) => {
+    const v = el.getAttribute("href");
+    if (isVideo(v)) add(v, "ссылка <a>");
+  });
+  doc.querySelectorAll("iframe[src], iframe[data-src], embed[src]").forEach((el) => {
+    const v = el.getAttribute("src") || el.getAttribute("data-src"); // data-src — ленивая загрузка
+    const url = resolve(v, base);
+    if (!url || NOT_PLAYER.test(url)) return;
+    if (EMBED_HOSTS.test(url) || EMBED_HINT.test(url)) add(v, "<iframe>", "embed");
+  });
+
+  // Ссылки внутри скриптов и JSON, в т.ч. экранированные: https:\/\/cdn\/v.mp4?a=1&b=2
+  const text = html
+    .replace(/\\u002f/gi, "/").replace(/\\u0026/gi, "&").replace(/\\u003d/gi, "=")
+    .replace(/\\\//g, "/");
+  for (const m of text.matchAll(URL_IN_TEXT)) {
+    const u = m[0].replace(/[.,;]+$/, "");
+    if (isVideo(u)) add(u, "в коде/скрипте");
+  }
+
+  const order = { direct: 0, stream: 1, embed: 2 };
+  return {
+    items: [...map.values()].sort((a, b) => order[a.kind] - order[b.kind]),
+    title: (doc.querySelector("meta[property='og:title']")?.getAttribute("content") || doc.title).trim(),
+    base,
+  };
+}
+
+function render() {
+  const list = $("list");
+  list.replaceChildren();
+  $("count").textContent = found.length ? `Найдено: ${found.length}` : "Ссылок нет";
+  if (!found.length) {
+    const li = document.createElement("li");
+    li.className = "empty"; li.style.display = "block";
+    li.textContent = $("src").value.trim() ? "Видео-ссылок не нашлось" : "Здесь появятся найденные ссылки";
+    list.append(li);
+  }
+  found.forEach((item, i) => {
+    const li = document.createElement("li");
+
+    const cb = document.createElement("input");
+    cb.type = "checkbox"; cb.dataset.i = i; cb.checked = item.kind !== "embed";
+    cb.addEventListener("change", updateButtons);
+
+    const body = document.createElement("div");
+    const url = document.createElement("div");
+    url.className = "url";
+    const badge = document.createElement("span");
+    badge.className = "badge " + item.kind;
+    badge.textContent = item.kind === "embed" ? "ПЛЕЕР"
+      : item.ext === "m3u8" ? "HLS" : item.ext === "mpd" ? "DASH" : (item.ext || "video").toUpperCase();
+    url.append(badge, item.url);
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    meta.textContent = "Найдено: " + [...item.sources].join(", ");
+    body.append(url, meta);
+
+    const actions = document.createElement("div");
+    actions.className = "actions";
+    const copy = document.createElement("button");
+    copy.textContent = "Копировать";
+    copy.onclick = () => copyText(item.url);
+    const open = document.createElement("a");
+    open.className = "btn"; open.textContent = "Открыть";
+    open.href = item.url; open.target = "_blank"; open.rel = "noopener noreferrer";
+    open.style.cssText = "padding:4px 8px;font-size:12px;text-decoration:none";
+    actions.append(copy, open);
+
+    li.append(cb, body, actions);
+    list.append(li);
+  });
+  $("cmdBox").hidden = true;
+  updateButtons();
+}
+
+function selected() {
+  return [...document.querySelectorAll("#list input[type=checkbox]:checked")].map((cb) => found[cb.dataset.i]);
+}
+
+function updateButtons() {
+  const sel = selected();
+  $("copySel").disabled = !sel.length;
+  $("cmd").disabled = !sel.length;
+  $("dl").disabled = !sel.length || !viaServer;
+  $("dl").title = viaServer ? "" : "Запустите python3 server.py — скачивание идёт через него";
+  $("all").checked = found.length > 0 && sel.length === found.length;
+}
+
+const shq = (s) => "'" + s.replace(/'/g, "'\\''") + "'";
+
+function showCommand() {
+  const sel = selected();
+  const opts = [];
+  if (page.title && sel.length === 1) opts.push("-n", shq(page.title));
+  if (page.base) opts.push("--referer", shq(page.base));
+  $("cmdText").textContent = ["python3 download.py", ...opts, ...sel.map((s) => shq(s.url))].join(" ");
+  const needs = [];
+  if (sel.some((s) => s.kind === "stream")) needs.push("ffmpeg (HLS/DASH)");
+  if (sel.some((s) => s.kind === "embed")) needs.push("yt-dlp (плееры)");
+  $("cmdNote").textContent = needs.length ? "Понадобится: " + needs.join(", ") + " — brew install ffmpeg yt-dlp" : "";
+  $("cmdBox").hidden = false;
+}
+
+// Скачивание: сервер качает все ссылки сразу, страница опрашивает /jobs и рисует полосы.
+const JOB_STATUS = { queued: "запуск", running: "качается", done: "готово", error: "ошибка" };
+let pollTimer;
+
+async function startDownload() {
+  const sel = selected();
+  $("dl").disabled = true;
+  try {
+    const r = await fetch("/download", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        urls: sel.map((s) => s.url),
+        name: sel.length === 1 ? page.title : "",
+        referer: page.base,
+      }),
+    });
+    if (!r.ok) throw new Error(await r.text());
+    pollJobs();
+  } catch (e) {
+    alert("Не удалось начать загрузку: " + e.message);
+  } finally {
+    updateButtons();
+  }
+}
+
+async function pollJobs() {
+  clearTimeout(pollTimer);
+  let jobs;
+  try {
+    jobs = await (await fetch("/jobs")).json();
+  } catch {
+    return; // сервер остановлен — опрашивать нечего
+  }
+  renderJobs(jobs);
+  if (jobs.some((j) => j.status === "queued" || j.status === "running")) {
+    pollTimer = setTimeout(pollJobs, 500);
+  }
+}
+
+function renderJobs(jobs) {
+  $("jobsCard").hidden = !jobs.length;
+  $("jobs").replaceChildren(...jobs.slice().reverse().map((job) => {
+    const li = document.createElement("li");
+    li.className = "job " + job.status;
+
+    const head = document.createElement("div");
+    head.className = "job-head";
+    const url = document.createElement("div");
+    url.className = "url";
+    url.textContent = job.path ? job.path.split("/").pop() : job.url;
+    url.title = job.path || job.url;
+    const status = document.createElement("span");
+    status.className = "job-status";
+    const percent = job.status === "running" && job.fraction != null ? ` ${Math.round(job.fraction * 100)}%` : "";
+    status.textContent = JOB_STATUS[job.status] + percent;
+    head.append(url, status);
+
+    const bar = document.createElement("div");
+    bar.className = "bar";
+    const fill = document.createElement("span");
+    if (job.status === "running" && job.fraction == null) bar.classList.add("indeterminate");
+    else fill.style.width = (job.status === "error" ? 0 : (job.fraction || 0) * 100) + "%";
+    bar.append(fill);
+
+    const meta = document.createElement("div");
+    meta.className = job.error ? "meta job-error" : "meta";
+    meta.textContent = job.error || (job.status === "running" ? job.label || "" : "");
+
+    li.append(head, bar, meta);
+    return li;
+  }));
+}
+
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    const ta = Object.assign(document.createElement("textarea"), { value: text });
+    document.body.append(ta); ta.select(); document.execCommand("copy"); ta.remove();
+  }
+  const t = $("toast");
+  t.textContent = "Скопировано";
+  t.classList.add("show");
+  clearTimeout(copyText.timer);
+  copyText.timer = setTimeout(() => t.classList.remove("show"), 1200);
+}
+
+// Через server.py страница открыта по http и может грузить чужие сайты через /fetch.
+// Открытая как файл — пробует напрямую, но большинство сайтов это запрещают (CORS).
+async function loadUrl() {
+  const url = $("base").value.trim();
+  const status = $("status");
+  if (!/^https?:\/\//i.test(url)) { status.textContent = "Введите адрес, начиная с http:// или https://"; return; }
+  $("load").disabled = true;
+  status.textContent = "Загружаю…";
+  try {
+    const r = await fetch(viaServer ? "/fetch?url=" + encodeURIComponent(url) : url);
+    const text = await r.text();
+    if (!r.ok) throw new Error(viaServer ? text : `HTTP ${r.status}`);
+    const finalUrl = viaServer ? decodeURI(r.headers.get("X-Final-Url") || url) : r.url;
+    $("src").value = text;
+    $("base").value = finalUrl;
+    ({ items: found, ...page } = extract(text, finalUrl));
+    render();
+    status.textContent = `Загружено ${(text.length / 1024).toFixed(0)} КБ` + (finalUrl !== url ? ` (редирект на ${finalUrl})` : "");
+  } catch (e) {
+    status.textContent = location.protocol === "file:"
+      ? "Сайт не разрешает загрузку из браузера. Запустите python3 server.py — он откроет эту страницу с рабочей загрузкой."
+      : "Ошибка: " + e.message;
+  } finally {
+    $("load").disabled = false;
+  }
+}
+
+let timer;
+function scheduleExtract() {
+  clearTimeout(timer);
+  timer = setTimeout(() => { ({ items: found, ...page } = extract($("src").value, $("base").value.trim())); render(); }, 250);
+}
+
+function loadFile(file) {
+  if (!file) return;
+  file.text().then((t) => { $("src").value = t; scheduleExtract(); });
+}
+
+$("src").addEventListener("input", scheduleExtract);
+$("base").addEventListener("input", scheduleExtract);
+$("base").addEventListener("keydown", (e) => { if (e.key === "Enter") loadUrl(); });
+$("load").onclick = loadUrl;
+$("file").addEventListener("change", (e) => loadFile(e.target.files[0]));
+$("clear").onclick = () => { $("src").value = ""; $("base").value = ""; $("status").textContent = ""; scheduleExtract(); };
+$("all").addEventListener("change", (e) => {
+  document.querySelectorAll("#list input[type=checkbox]").forEach((cb) => (cb.checked = e.target.checked));
+  updateButtons();
+});
+$("copySel").onclick = () => copyText(selected().map((s) => s.url).join("\n"));
+$("cmd").onclick = showCommand;
+$("dl").onclick = startDownload;
+if (viaServer) pollJobs(); // показать загрузки, начатые до перезагрузки страницы
+$("copyCmd").onclick = () => copyText($("cmdText").textContent);
+
+const src = $("src");
+src.addEventListener("dragover", (e) => { e.preventDefault(); src.classList.add("drag"); });
+src.addEventListener("dragleave", () => src.classList.remove("drag"));
+src.addEventListener("drop", (e) => {
+  e.preventDefault(); src.classList.remove("drag");
+  loadFile(e.dataTransfer.files[0]);
+});
+</script>
+</body>
+</html>

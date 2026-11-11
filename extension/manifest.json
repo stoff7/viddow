@@ -1,0 +1,10 @@
+{
+  "manifest_version": 3,
+  "name": "Video Links Catcher",
+  "version": "2.0",
+  "description": "Ловит HLS/DASH-потоки, которые запрашивает страница, и качает их через download.py.",
+  "permissions": ["webRequest", "storage", "nativeMessaging"],
+  "host_permissions": ["<all_urls>"],
+  "background": { "service_worker": "background.js" },
+  "action": { "default_title": "Найденные потоки", "default_popup": "popup.html" }
+}
