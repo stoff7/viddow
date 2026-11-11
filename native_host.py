@@ -3,13 +3,14 @@
 
 Протокол Chrome: сообщения в stdin/stdout, каждое — 4 байта длины (little-endian) + JSON.
 Session v2 (основная панель):
-    ← {"type": "session", "settings": {"workers": 2, "output_dir": "~/Downloads"}}
-    → {"type": "ready", "protocol": 2, "session", "jobs", "settings", "tools"}
-    ← {"command": "download|inspect|inspect_cancel|cancel|retry|clear|configure|reveal", "request_id", "session", ...}
+    ← {"type": "session", "settings": {"workers": 2, "output_dir": "~/Downloads"}, "history": [...]}
+    → {"type": "ready", "protocol": 2, "history_version": 1, "session", "jobs", "settings", "tools"}
+    ← {"command": "download|inspect|inspect_cancel|inspect_history|cancel|retry|clear|configure|reveal", "request_id", "session", ...}
     → {"type": "reply", "request_id", "ok", "result" | "error"}
     → {"type": "state", "session", "jobs", "settings", "tools"} при изменении состояния
 Команды требуют актуальный session ID. Очередь общая для вкладок расширения,
-история только в памяти. Закрытие панели не закрывает канал фонового процесса.
+постоянная безопасная история принадлежит расширению (chrome.storage.local).
+Восстановленные записи не запускаются. Закрытие панели не закрывает канал фонового процесса.
 
 Совместимые одиночные команды (прежний клиент, отдельный канал на действие):
     ← {"type": "download", "url", "name", "page", "referer", "headers"}
@@ -107,7 +108,7 @@ def main():
     try:
         if message.get("type") == "session":
             from native_session import Session
-            Session(message.get("settings") or {}, send).run(read_message)
+            Session(message.get("settings") or {}, send, history=message.get("history")).run(read_message)
             return
         if message.get("type") == "reveal":
             reveal(message.get("path", ""))

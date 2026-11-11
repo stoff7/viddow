@@ -95,8 +95,9 @@ code { font:10px/1.6 ui-monospace,SFMono-Regular,monospace; overflow-wrap:anywhe
 .job.done .job-status { color:var(--green); }
 .job.error .job-status { color:var(--danger); }
 .job.cancelled .job-status { color:var(--muted); }
+.job.interrupted .job-status { color:var(--muted); }
 .job-label { color:var(--muted); font-size:10px; margin-top:4px; overflow-wrap:anywhere; }
-.job-actions { display:flex; gap:13px; margin-top:8px; }
+.job-actions { display:flex; gap:13px; flex-wrap:wrap; margin-top:8px; }
 .bar { height:4px; background:var(--line); border-radius:4px; overflow:hidden; margin-top:9px; }
 .bar span { display:block; height:100%; background:var(--accent); transition:width .3s; }
 .bar.indeterminate span { width:25%; animation:slide 1.5s ease-in-out infinite; }

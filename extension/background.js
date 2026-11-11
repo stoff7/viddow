@@ -1,4 +1,5 @@
 import { rememberStream, groupStreams } from './stream-model.mjs';
+import { decodeHistory, historyFromJobs } from './history-model.mjs';
 
 const HOST = 'local.video_downloader';
 const STREAM_TYPE = /mpegurl|dash\+xml/i;
@@ -52,7 +53,22 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 
 // Один хост хранит очередь всех вкладок. Он живёт независимо от открытого UI.
 let port = null, connecting = null, session = null;
+let historyWritable = true, lastHistory = '', historyWarning = '';
 const pending = new Map();
+async function persistHistory(state) {
+  if (!historyWritable) return;
+  const history = historyFromJobs(state.jobs);
+  const encoded = JSON.stringify(history);
+  if (encoded === lastHistory) return;
+  try {
+    await chrome.storage.local.set({ history });
+    lastHistory = encoded;
+    await chrome.storage.session.set({ historyStatus: { warning: historyWarning, error: '' } });
+  } catch {
+    await chrome.storage.session.set({ historyStatus: { warning: historyWarning,
+      error: 'История не сохранена. Загрузки продолжаются; проверьте свободное место и хранилище расширения.' } });
+  }
+}
 function hostError(reason) {
   if (/not found|forbidden|not registered/i.test(reason || '')) {
     return 'Помощник не подключён. Выполните в папке проекта: python3 install_native_host.py';
@@ -63,7 +79,13 @@ async function ensureHost() {
   if (connecting) return connecting;
   if (port && session) return;
   connecting = (async () => {
-    const { settings = {} } = await chrome.storage.local.get('settings');
+    await chain;
+    const stored = await chrome.storage.local.get(['settings', 'history']);
+    const settings = stored.settings || {};
+    const decoded = decodeHistory(stored.history);
+    historyWritable = decoded.writable; historyWarning = decoded.warning;
+    lastHistory = JSON.stringify(stored.history);
+    await chrome.storage.session.set({ historyStatus: { warning: historyWarning, error: '' } });
     await update('host', () => ({ status: 'connecting', error: null }));
     return new Promise((resolve, reject) => {
       const current = chrome.runtime.connectNative(HOST);
@@ -95,30 +117,32 @@ async function ensureHost() {
         if (ended) return;
         if (message.type === 'ready' || message.type === 'state') {
           if (message.type === 'ready') {
-            if (message.protocol !== 2 || typeof message.session !== 'string' || !message.session) {
+            if (message.protocol !== 2 || message.history_version !== 1 || typeof message.session !== 'string' || !message.session) {
               disconnected('Помощник использует несовместимый протокол. Обновите файлы проекта.');
               current.disconnect();
               return;
             }
             session = message.session;
           } else if (!ready || message.session !== session) return;
-          update('nativeState', () => message);
+          const saved = update('nativeState', () => message, persistHistory);
           update('host', () => ({ status: 'online', error: null }));
           if (message.type === 'ready') {
-            ready = true; clearTimeout(timeout); resolve();
+            ready = true; clearTimeout(timeout); saved.then(resolve, reject);
           }
         } else if (message.type === 'reply') {
           const request = pending.get(message.request_id);
           if (!request) return;
           clearTimeout(request.timer); pending.delete(message.request_id);
-          if (message.ok) request.resolve(message.result);
-          else request.reject(new Error(message.error));
+          chain.then(() => {
+            if (message.ok) request.resolve(message.result);
+            else request.reject(new Error(message.error));
+          }, request.reject);
         } else if (message.type === 'error') {
           disconnected(message.error); current.disconnect();
         }
       });
       current.onDisconnect.addListener(() => disconnected(chrome.runtime.lastError?.message));
-      current.postMessage({ type: 'session', settings });
+      current.postMessage({ type: 'session', settings, history: decoded.history.jobs });
     });
   })();
   try { return await connecting; }
@@ -157,7 +181,7 @@ async function handle(message) {
   if (message.type === 'inspect_cancel') {
     return command({ command: 'inspect_cancel', analysis_id: message.analysis_id, session: message.session });
   }
-  if (['cancel', 'retry', 'clear', 'reveal'].includes(message.type)) {
+  if (['cancel', 'retry', 'clear', 'reveal', 'inspect_history'].includes(message.type)) {
     return command({ command: message.type, id: message.id, session: message.session });
   }
   if (message.type === 'configure') {

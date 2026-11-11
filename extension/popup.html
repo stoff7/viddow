@@ -12,6 +12,7 @@
 <header class="header"><a class="brand" href="#" aria-label="Viddow"><span class="brand-mark">↓</span>viddow<span>.</span></a><button id="theme" class="icon-button" aria-label="Переключить тему" title="Переключить тему">◐</button></header>
 <div class="connection"><span id="hostDot" class="dot"></span><span id="hostStatus" role="status">Подключаем загрузчик…</span><button id="reconnect" class="text-button" hidden>Подключить</button></div>
 <div id="hostError" class="notice error" hidden></div>
+<div id="historyStatus" class="notice" role="status" hidden></div>
 <div id="message" class="notice" role="status" hidden></div>
 <nav class="tabs" aria-label="Разделы расширения"><button data-view="streams" aria-pressed="true">На странице <span id="streamCount">0</span></button><button data-view="jobs" aria-pressed="false">Загрузки <span id="jobCount">0</span></button><button data-view="settings" aria-pressed="false">Настройки</button></nav>
 <main>
@@ -45,7 +46,7 @@
   <div class="filters" role="group" aria-label="Фильтр загрузок"><button data-filter="all" aria-pressed="true">Все</button><button data-filter="active" aria-pressed="false">В работе</button><button data-filter="done" aria-pressed="false">Готово</button></div>
   <div id="jobsEmpty" class="empty"><span class="empty-icon" aria-hidden="true">↓</span><h3>Здесь будут ваши загрузки</h3><p>Одна очередь для всех вкладок.<br>Можно закрыть панель — скачивание продолжится.</p></div>
   <ul id="jobs" class="job-list"></ul>
-  <p class="session-note">История текущей сессии. При закрытии браузера незавершённые загрузки останавливаются.</p>
+  <p class="session-note">История сохраняется между запусками. При закрытии браузера незавершённые загрузки останавливаются и затем отмечаются как прерванные. Автоматического повтора нет.</p>
 </section>
 <section id="settingsView" hidden>
   <h2>Всё под рукой</h2><p class="muted">Настройки для новых загрузок из расширения.</p>

@@ -1,13 +1,14 @@
 import { groupStreams } from './stream-model.mjs';
 import { formatLabel, mainFormats, choiceProblem, durationLabel } from './format-model.mjs';
+import { decodeHistory, offlineJobs } from './history-model.mjs';
 
 const $ = (id) => document.getElementById(id);
 const el = (tag, className, text) => Object.assign(document.createElement(tag),
   className ? { className } : {}, text === undefined ? {} : { textContent: text });
 const ACTIVE = new Set(['queued', 'running', 'cancelling']);
-const STATUS = { queued: 'В очереди', running: 'Скачиваем', cancelling: 'Останавливаем…', done: 'Готово', error: 'Ошибка', cancelled: 'Отменено' };
+const STATUS = { queued: 'В очереди', running: 'Скачиваем', cancelling: 'Останавливаем…', done: 'Готово', error: 'Ошибка', cancelled: 'Отменено', interrupted: 'Прервано' };
 let tab = null, tabKey = '', items = [], state = { jobs: [], settings: {} }, online = false;
-let filter = 'all', settingsDirty = false, refreshRevision = 0;
+let filter = 'all', settingsDirty = false, refreshRevision = 0, hostRevision = 0;
 let analysisKey = '', dismissedAnalysis = '', inspectPending = false, selectionPending = false;
 const choices = new Map(), cards = new Map();
 const ownWindow = await chrome.windows.getCurrent();
@@ -31,7 +32,7 @@ function setTheme(theme) {
   document.documentElement.dataset.theme = theme;
   $('theme').setAttribute('aria-label', theme === 'dark' ? 'Светлая тема' : 'Тёмная тема');
 }
-const preferences = await chrome.storage.local.get(['theme', 'settings']);
+const preferences = await chrome.storage.local.get(['theme', 'settings', 'history']);
 setTheme(preferences.theme || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'));
 $('theme').onclick = async () => {
   const theme = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
@@ -42,6 +43,12 @@ function validUrl(value) {
   try { return /^https?:$/.test(new URL(value).protocol); } catch { return false; }
 }
 function hostOf(url) { try { return new URL(url).host; } catch { return ''; } }
+function filenameOf(url) { try { return decoded(new URL(url).pathname.split('/').pop()); } catch { return ''; } }
+function renderHistoryStatus(status) {
+  $('historyStatus').textContent = [status?.warning, status?.error].filter(Boolean).join(' ');
+  $('historyStatus').hidden = !$('historyStatus').textContent;
+  $('historyStatus').classList.toggle('error', Boolean(status?.error));
+}
 function decoded(value) { try { return decodeURIComponent(value); } catch { return value; } }
 function observed(item) {
   return item.lastSeen ? new Date(item.lastSeen).toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '';
@@ -258,30 +265,36 @@ function renderJobs() {
     card.root.className = `job ${job.status}`;
     card.root.hidden = filter === 'active' ? !ACTIVE.has(job.status) : filter === 'done' && job.status !== 'done';
     if (!card.root.hidden) visible++;
-    card.title.textContent = job.path ? job.path.split(/[\\/]/).pop() : job.name || decoded(new URL(job.url).pathname.split('/').pop()) || hostOf(job.url);
+    card.title.textContent = job.path ? job.path.split(/[\\/]/).pop() : job.name || filenameOf(job.url) || hostOf(job.url) || 'Видео';
     card.title.title = job.path || job.url;
-    card.source.textContent = hostOf(job.url);
-    card.format.hidden = !job.format_ids?.length;
-    card.format.textContent = job.format_ids?.length ? `Выбрано: ${job.format_label || job.format_ids.join(' + ')}` : '';
+    card.source.textContent = [hostOf(job.url), job.restored && job.created_at ? new Date(job.created_at).toLocaleString('ru') : ''].filter(Boolean).join(' · ');
+    card.format.hidden = !job.format_ids?.length && !job.format_label;
+    card.format.textContent = job.format_label || job.format_ids?.length ? `Выбрано: ${job.format_label || job.format_ids.join(' + ')}` : '';
     const percent = job.fraction == null ? null : Math.round(Math.max(0, Math.min(1, job.fraction)) * 100);
-    card.status.textContent = STATUS[job.status] + (job.status === 'running' && percent !== null ? ` · ${percent}%` : '');
-    card.label.textContent = job.error || (ACTIVE.has(job.status) ? job.label : '');
+    card.status.textContent = STATUS[job.status] + (job.status === 'running' && percent !== null ? ` · ${percent}%` : '')
+      + (job.status === 'done' && job.file_exists === false ? ' · файл не найден' : '');
+    card.label.textContent = job.error || (ACTIVE.has(job.status) ? job.label : job.restored
+      ? job.page_retry ? 'Для повтора получим свежие форматы со страницы. Загрузку нужно подтвердить.' : 'Ссылка загрузки не сохранена. Для повтора вставьте свежую ссылку.' : '');
     card.bar.hidden = !['running', 'cancelling'].includes(job.status);
     card.bar.classList.toggle('indeterminate', percent === null);
     card.bar.setAttribute('aria-label', `Скачивание ${card.title.textContent}`);
     if (percent === null) card.bar.removeAttribute('aria-valuenow');
     else card.bar.setAttribute('aria-valuenow', percent);
     card.fill.style.width = percent === null ? '' : `${percent}%`;
-    const actionKey = `${state.session}:${job.status}:${online}:${job.path || ''}`;
+    const actionKey = `${state.session}:${job.status}:${online}:${job.path || ''}:${job.file_exists}:${job.restored}:${job.page_retry}`;
     if (card.actionKey !== actionKey) {
       card.actionKey = actionKey;
       card.actions.replaceChildren();
       const command = (type) => send({ type, id: job.id, session: state.session });
       if (online && ['queued', 'running'].includes(job.status)) card.actions.append(action('Отменить', () => command('cancel')));
-      if (online && ['error', 'cancelled'].includes(job.status)) card.actions.append(action('Повторить', () => command('retry')));
+      if (online && !job.restored && ['error', 'cancelled'].includes(job.status)) card.actions.append(action('Повторить', () => command('retry')));
+      if (online && job.restored && job.page_retry) card.actions.append(action('Повторить со страницы', async () => {
+        await command('inspect_history'); dismissedAnalysis = ''; view('streams');
+        notice('Проверяем исходную страницу. Подтвердите формат перед загрузкой.');
+      }));
       if (job.status === 'done') {
-        if (online) card.actions.append(action('В Finder', () => command('reveal')));
-        card.actions.append(action('Копировать путь', () => copy(job.path)));
+        if (online && job.file_exists !== false) card.actions.append(action('В Finder', () => command('reveal')));
+        if (job.path) card.actions.append(action('Копировать путь', () => copy(job.path)));
       }
     }
   });
@@ -302,6 +315,7 @@ function renderState(next) {
   renderAnalysis(); renderJobs(); renderStreams();
 }
 function renderHost(host) {
+  hostRevision++;
   online = host?.status === 'online';
   $('hostDot').className = `dot ${online ? 'online' : host?.status === 'offline' ? 'offline' : ''}`;
   $('hostStatus').textContent = online ? 'Загрузчик подключён' : host?.status === 'connecting' ? 'Подключаем загрузчик…' : 'Помощник недоступен';
@@ -314,7 +328,10 @@ async function connect() {
   renderHost({ status: 'connecting' });
   try {
     await send({ type: 'connect' });
-    renderHost((await chrome.storage.session.get('host')).host);
+    const revision = hostRevision;
+    const storedHost = (await chrome.storage.session.get('host')).host;
+    // Событие storage новее запроса чтения и не должно затираться его ответом.
+    if (revision === hostRevision) renderHost(storedHost);
   }
   catch (error) { renderHost({ status: 'offline', error: error.message }); }
 }
@@ -364,8 +381,11 @@ chrome.storage.session.onChanged.addListener((changes) => {
   if (changes[tabKey]) { items = changes[tabKey].newValue || []; renderStreams(); }
   if (changes.nativeState) renderState(changes.nativeState.newValue);
   if (changes.host) renderHost(changes.host.newValue);
+  if (changes.historyStatus) renderHistoryStatus(changes.historyStatus.newValue);
 });
-const stored = await chrome.storage.session.get(['nativeState', 'host']);
-renderState(stored.nativeState); renderHost(stored.host);
+const stored = await chrome.storage.session.get(['nativeState', 'host', 'historyStatus']);
+const history = decodeHistory(preferences.history);
+renderState(stored.nativeState || { jobs: offlineJobs(history.history), settings: preferences.settings || {} }); renderHost(stored.host);
+renderHistoryStatus(stored.historyStatus || { warning: history.warning });
 await refreshTab();
 await connect();

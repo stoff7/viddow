@@ -55,14 +55,17 @@ const { extensionPath, openPanel } = require('./extension_browser.cjs');
                 if (globalThis.__nativeMode === 'silent') return;
                 if (globalThis.__nativeMode === 'error') { this.onMessage.fire({ type: 'error', error: 'Нет доступа к папке' }); return; }
                 globalThis.__nativeSession++;
-                globalThis.__nativeJobs = [];
-                this.onMessage.fire({ ...snapshot(), type: 'ready', protocol: globalThis.__nativeMode === 'old' ? 1 : 2 });
+                globalThis.__nativeJobs = (message.history || []).map(job => ({ ...job, restored: true,
+                  url: job.page || job.source_origin, status: ['running', 'queued', 'cancelling'].includes(job.status) ? 'interrupted' : job.status }));
+                globalThis.__nativeSequence = Math.max(globalThis.__nativeSequence, ...globalThis.__nativeJobs.map(job => job.id));
+                this.onMessage.fire({ ...snapshot(), type: 'ready', protocol: globalThis.__nativeMode === 'old' ? 1 : 2, history_version: 1 });
                 return;
               }
               const command = message.command;
               let result = {}, error = null;
               if (command === 'download') {
                 const job = { id: ++globalThis.__nativeSequence, url: message.urls[0], name: message.name,
+                  page: message.page || (message.source_kind === 'page' ? message.urls[0] : null),
                   status: 'running', fraction: .32, label: '3.2 / 10 МБ', path: null, error: null };
                 globalThis.__nativeJobs.push(job); result = { ids: [job.id] };
               } else if (command === 'cancel') {
@@ -76,8 +79,8 @@ const { extensionPath, openPanel } = require('./extension_browser.cjs');
                 if (globalThis.__nativeJobs.some(job => job.status === 'running')) error = 'Очередь занята';
                 else { globalThis.__nativeSettings = message.settings; result = message.settings; }
               }
-              this.onMessage.fire({ type: 'reply', request_id: message.request_id, ok: !error, result, error });
               this.onMessage.fire(snapshot());
+              this.onMessage.fire({ type: 'reply', request_id: message.request_id, ok: !error, result, error });
             }, 10);
           } };
         globalThis.__nativePort = port;
@@ -170,9 +173,57 @@ const { extensionPath, openPanel } = require('./extension_browser.cjs');
     assert.equal(stale.ok, false);
     assert.match(stale.error, /Сессия/);
     assert.equal(await worker.evaluate(() => globalThis.__nativeCalls.filter(message => message.command === 'download').length), downloads);
-    await panel.waitForFunction(() => document.querySelector('#jobCount').textContent === '0');
+    await panel.waitForFunction(() => document.querySelectorAll('.job.interrupted').length === 1);
+    assert.equal(await panel.locator('#jobCount').textContent(), '3');
+    assert.equal((await worker.evaluate(() => chrome.storage.local.get('history'))).history.version, 1);
+
+    // Неизвестная будущая схема не перезаписывается даже новыми задачами.
+    const future = { version: 42, jobs: [], marker: 'leave-untouched' };
+    await worker.evaluate(async value => { await chrome.storage.local.set({ history: value }); globalThis.__nativePort.disconnect(); }, future);
+    await panel.locator('#hostDot.offline').waitFor();
+    await panel.locator('#reconnect').click(); await panel.locator('#hostDot.online').waitFor();
+    assert.match(await panel.locator('#historyStatus').textContent(), /более новой версией/);
+    await panel.locator('[data-view=streams]').click(); await panel.locator('#manualUrl').fill(base + '/future.mp4'); await panel.locator('#manualUrl').press('Enter');
+    await panel.locator('.job.running').waitFor();
+    assert.deepEqual((await worker.evaluate(() => chrome.storage.local.get('history'))).history, future);
+
+    // Миграция старого массива и пропуск повреждённой записи с диагностикой.
+    const legacy = [{ id: 50, title: 'Legacy lesson', status: 'done', path: '/tmp/Viddow/legacy.mp4', source_page: base + '/other' }];
+    await worker.evaluate(async value => { await chrome.storage.local.set({ history: value }); globalThis.__nativePort.disconnect(); }, legacy);
+    await panel.locator('#hostDot.offline').waitFor(); await panel.locator('#reconnect').click(); await panel.locator('#hostDot.online').waitFor();
+    const migrated = (await worker.evaluate(() => chrome.storage.local.get('history'))).history;
+    assert.equal(migrated.version, 1); assert.equal(migrated.jobs[0].name, 'Legacy lesson');
+    await worker.evaluate(async value => { await chrome.storage.local.set({ history: { version: 1, jobs: [null, ...value.jobs] } }); globalThis.__nativePort.disconnect(); }, migrated);
+    await panel.locator('#hostDot.offline').waitFor(); await panel.locator('#reconnect').click();
+    try { await panel.locator('#hostDot.online').waitFor({ timeout: 5000 }); }
+    catch (error) {
+      console.log('History UI diagnostic:', await panel.locator('body').innerText(), await panel.locator('#hostDot').getAttribute('class'), errors);
+      console.log('History reconnect diagnostic:', await worker.evaluate(async () => ({
+        stored: await chrome.storage.session.get(['host', 'historyStatus']),
+        calls: globalThis.__nativeCalls.slice(-2), jobs: globalThis.__nativeJobs,
+      })));
+      throw error;
+    }
+    assert.match(await panel.locator('#historyStatus').textContent(), /повреждённые записи/);
+    assert.equal((await worker.evaluate(() => chrome.storage.local.get('history'))).history.jobs.length, 1);
+
+    // Ошибка storage видна, не блокирует скачивание; новый итог повторяет запись.
+    await worker.evaluate(() => {
+      const original = chrome.storage.local.set.bind(chrome.storage.local);
+      globalThis.__historyWriteFails = true;
+      chrome.storage.local.set = value => value.history && globalThis.__historyWriteFails
+        ? Promise.reject(new Error('test storage error')) : original(value);
+    });
+    await panel.locator('[data-view=streams]').click(); await panel.locator('#manualUrl').fill(base + '/storage.mp4'); await panel.locator('#manualUrl').press('Enter');
+    await panel.locator('.job.running').waitFor();
+    assert.match(await panel.locator('#historyStatus.error').textContent(), /История не сохранена/);
+    assert.equal(await panel.locator('#hostDot.online').isVisible(), true);
+    await worker.evaluate(() => { globalThis.__historyWriteFails = false; globalThis.__nativeFinish(); });
+    await panel.waitForFunction(() => !document.querySelector('#historyStatus').classList.contains('error'));
+    const storedHistory = (await worker.evaluate(() => chrome.storage.local.get('history'))).history;
+    assert.equal(storedHistory.jobs.at(-1).status, 'done');
     assert.deepEqual(errors, []);
-    console.log('Extension smoke: PASS (real capture, grouping, chosen URL, tabs, commands, settings, themes, disconnect)');
+    console.log('Extension smoke: PASS (capture, grouping, tabs, commands, settings, reconnect, history migration/corruption/future version/storage error)');
     console.log('Screenshots:', artifacts);
   } finally {
     if (context) await context.close();

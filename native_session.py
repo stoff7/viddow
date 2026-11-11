@@ -30,15 +30,18 @@ def settings_from(value):
 
 
 class Session:
-    def __init__(self, settings, send, manager_factory=JobManager):
+    def __init__(self, settings, send, manager_factory=JobManager, history=None):
         workers, folder = settings_from(settings)
         self.manager = manager_factory(workers=workers, folder=folder)
         self.send = send
         self.id = uuid.uuid4().hex
         self.inspector = Inspector()
+        self._publish_lock = threading.Lock()
+        self.manager.restore_history(history or [])
 
     def state(self):
         return {"type": "state", "session": self.id, "jobs": self.manager.snapshots(),
+                "history_version": 1,
                 "settings": {"workers": self.manager.workers, "output_dir": self.manager.folder},
                 "tools": {"yt_dlp": bool(shutil.which("yt-dlp")), "ffmpeg": bool(shutil.which("ffmpeg"))},
                 "analysis": self.inspector.snapshot()}
@@ -66,6 +69,14 @@ class Session:
                 if not isinstance(identifier, str):
                     raise ValueError("Нужен ID анализа")
                 self.inspector.stop(identifier)
+            elif command == "inspect_history":
+                job_id = message.get("id")
+                if type(job_id) is not int:
+                    raise ValueError("Неверный номер задачи")
+                job = next((row for row in self.manager.snapshots() if row["id"] == job_id), None)
+                if not job or not job["restored"] or not job["page"] or not job["page_retry"]:
+                    raise ValueError("Исходная страница не сохранена. Вставьте свежую ссылку.")
+                result = self.inspector.start(job["page"], source_kind="page", name=job["name"], page=job["page"], headers={})
             elif command in ("cancel", "retry", "reveal"):
                 job_id = message.get("id")
                 if type(job_id) is not int:
@@ -88,6 +99,9 @@ class Session:
                 result = self.state()["settings"]
             else:
                 raise ValueError("Неизвестная команда")
+            # Снимок перед reply позволяет worker сохранить историю до подтверждения UI.
+            with self._publish_lock:
+                self.send(self.state())
             self.send({"type": "reply", "request_id": request_id, "ok": True, "result": result})
         except Exception as error:
             self.send({"type": "reply", "request_id": request_id, "ok": False,
@@ -99,10 +113,11 @@ class Session:
         def report():
             previous = None
             while not stopped.is_set():
-                current = self.state()
-                if current != previous:
-                    self.send(current)
-                    previous = current
+                with self._publish_lock:
+                    current = self.state()
+                    if current != previous:
+                        self.send(current)
+                        previous = current
                 stopped.wait(0.25)
 
         self.send({**self.state(), "type": "ready", "protocol": 2})

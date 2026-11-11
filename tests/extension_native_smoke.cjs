@@ -39,6 +39,7 @@ const alive = pid => { try { process.kill(pid, 0); return true; } catch (error) 
   }
   const video = fs.readFileSync(path.join(media, 'video.mp4'));
   const requests = [];
+  let historyGeneration = 1;
   const server = http.createServer((request, response) => {
     const url = new URL(request.url, 'http://fixture');
     requests.push({ path: request.url, headers: request.headers });
@@ -74,7 +75,7 @@ const alive = pid => { try { process.kill(pid, 0); return true; } catch (error) 
       type = url.pathname.endsWith('.ts') ? 'video/mp2t' : 'application/vnd.apple.mpegurl';
     } else {
       const title = url.pathname === '/other' ? 'Другая вкладка' : url.pathname === '/window2' ? 'Второе окно' : 'Локальное видео';
-      body = Buffer.from(`<title>${title}</title><h1>${title}</h1><video src="${url.pathname === '/slowpage' ? '/slow.mp4' : '/video.mp4'}" preload="none" controls></video>`);
+      body = Buffer.from(`<title>${title}</title><h1>${title}</h1><video src="${url.pathname === '/slowpage' ? '/slow.mp4' : url.pathname === '/historywatch' ? `/video.mp4?token=history-generation-${historyGeneration}` : '/video.mp4'}" preload="none" controls></video>`);
       type = 'text/html; charset=utf-8';
     }
     response.writeHead(200, { 'Content-Type': type, 'Content-Length': body.length });
@@ -93,15 +94,16 @@ const alive = pid => { try { process.kill(pid, 0); return true; } catch (error) 
     const quote = value => "'" + value.replaceAll("'", "'\\''") + "'";
     fs.writeFileSync(wrapper, `#!/bin/sh\nprintf '%s\\n' "$$" >> ${quote(pidsFile)}\nexec ${quote(manifest.path)}\n`, { mode: 0o755 });
     fs.writeFileSync(manifestPath, JSON.stringify({ ...manifest, path: wrapper }));
-    context = await chromium.launchPersistentContext(profile, {
+    const launch = () => chromium.launchPersistentContext(profile, {
       headless: false, viewport: null, colorScheme: 'light',
       ...(process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {}),
       args: ['--no-proxy-server', `--disable-extensions-except=${extensionPath}`, `--load-extension=${extensionPath}`],
     });
+    context = await launch();
     context.setDefaultTimeout(12000);
     const errors = [];
     context.on('page', page => page.on('pageerror', error => errors.push(error.message)));
-    const worker = context.serviceWorkers()[0] || await context.waitForEvent('serviceworker');
+    let worker = context.serviceWorkers()[0] || await context.waitForEvent('serviceworker');
     assert.ok(manifest.allowed_origins.includes(`chrome-extension://${new URL(worker.url()).host}/`));
     await worker.evaluate(settings => chrome.storage.local.set({ settings }), { workers: 1, output_dir: output });
     const state = () => worker.evaluate(async () => (await chrome.storage.session.get('nativeState')).nativeState);
@@ -308,6 +310,19 @@ const alive = pid => { try { process.kill(pid, 0); return true; } catch (error) 
     assert.equal((await state()).settings.output_dir, fs.realpathSync(newOutput));
     console.log('PASS actual missing host, reconnect, persisted settings, no automatic restart');
 
+    // История результата и приватного прямого URL перед настоящим перезапуском.
+    const historyPage = base + '/historywatch';
+    assert.equal((await send(panel, { type: 'download', item: { url: historyPage, source_kind: 'page',
+      headers: { Cookie: 'private-history-cookie', Authorization: 'Bearer private-history-auth' } },
+      title: 'History lesson', page: historyPage })).ok, true);
+    await waitUntil(async () => (await state()).jobs.some(job => job.url === historyPage && job.status === 'done'), 'History page download');
+    const historical = (await state()).jobs.find(job => job.url === historyPage);
+    await add(base + '/signed.mp4?signature=private-history-token');
+    await waitUntil(async () => (await state()).jobs.some(job => job.url.includes('/signed.mp4') && job.status === 'done'), 'Signed fixture download');
+    const signedSaved = (await state()).jobs.find(job => job.url.includes('/signed.mp4')).path;
+    await add(base + '/missing.mp4?token=private-history-error');
+    await waitUntil(async () => (await state()).jobs.some(job => job.status === 'error'), 'History error result');
+
     // EOF должен остановить не только хост, но и реальный yt-dlp в его группе.
     await other.goto(base + '/slowpage'); await other.bringToFront();
     await panel.waitForFunction(() => document.querySelector('#tabTitle').textContent === 'Локальное видео');
@@ -322,11 +337,61 @@ const alive = pid => { try { process.kill(pid, 0); return true; } catch (error) 
     };
     await waitUntil(() => descendants().length > 0, 'yt-dlp did not start');
     const toolPids = descendants();
+    const interruptedId = (await state()).jobs.find(job => job.status === 'running').id;
+    const beforeRestartSession = (await state()).session;
+    const persisted = (await worker.evaluate(() => chrome.storage.local.get('history'))).history;
+    assert.equal(persisted.version, 1);
+    for (const secret of ['private-history-cookie', 'private-history-auth', 'private-history-token', 'private-history-error', 'history-generation-1']) {
+      assert.equal(JSON.stringify(persisted).includes(secret), false, secret);
+    }
     assert.deepEqual(errors, []);
     await context.close(); context = null;
     await waitUntil(() => [...hostPids, ...toolPids].every(pid => !alive(pid)), 'Native host or yt-dlp survived browser EOF');
     assert.equal(fs.readdirSync(newOutput).some(file => file.endsWith('.part')), false);
     console.log('PASS real host exits on browser close and removes partial files');
+
+    // Тот же профиль, новый браузер и хост. Отсутствующий файл не теряет запись.
+    fs.unlinkSync(historical.path); historyGeneration = 2;
+    context = await launch(); context.setDefaultTimeout(12000);
+    context.on('page', page => page.on('pageerror', error => errors.push(error.message)));
+    worker = context.serviceWorkers()[0] || await context.waitForEvent('serviceworker');
+    const reopenedSource = await context.newPage(); await reopenedSource.goto(base + '/other');
+    const beforeOpen = requests.length;
+    panel = await openPanel(context, worker, reopenedSource); await panel.locator('#hostDot.online').waitFor();
+    const restored = await state();
+    assert.notEqual(restored.session, beforeRestartSession);
+    assert.equal(restored.jobs.length, persisted.jobs.length);
+    assert.equal(restored.jobs.every(job => job.restored), true);
+    assert.equal(restored.jobs.find(job => job.id === interruptedId).status, 'interrupted');
+    assert.equal(restored.jobs.find(job => job.id === historical.id).file_exists, false);
+    assert.equal(restored.jobs.some(job => ['running', 'queued', 'cancelling'].includes(job.status)), false);
+    assert.equal(requests.slice(beforeOpen).some(request => /\.mp4|\/historywatch|\/slowpage/.test(request.path)), false);
+    assert.equal(restored.settings.output_dir, fs.realpathSync(newOutput)); assert.equal(restored.settings.workers, 2);
+    assert.equal(await panel.locator('html').getAttribute('data-theme'), 'dark');
+    await panel.locator('[data-view=jobs]').click();
+    const oldCard = panel.locator(`.job[data-id="${historical.id}"]`);
+    assert.match(await oldCard.locator('.job-status').textContent(), /файл не найден/);
+    assert.equal(await oldCard.getByRole('button', { name: 'В Finder', exact: true }).count(), 0);
+    const retryStart = requests.length;
+    await oldCard.getByRole('button', { name: 'Повторить со страницы', exact: true }).click();
+    await panel.locator('#analysisResult').waitFor();
+    assert.equal((await state()).analysis.url, historyPage);
+    assert.equal(requests.slice(retryStart).filter(request => request.path === '/historywatch').every(request => !request.headers.cookie && !request.headers.authorization), true);
+    await panel.locator('#downloadFormat').click();
+    await waitUntil(async () => (await state()).jobs.some(job => !job.restored && job.status === 'done'), 'Fresh history retry', 20000);
+    assert.equal(requests.slice(retryStart).some(request => request.path === '/video.mp4?token=history-generation-2'), true);
+    assert.equal(requests.slice(retryStart).some(request => request.path === '/video.mp4?token=history-generation-1'), false);
+    const freshJob = (await state()).jobs.find(job => !job.restored && job.status === 'done');
+    assert.ok(freshJob.id > Math.max(...persisted.jobs.map(job => job.id)));
+    await panel.setViewportSize({ width: 320, height: 900 });
+    assert.equal(await panel.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    await panel.screenshot({ path: path.join(artifacts, 'history-restored-320.png') });
+    await panel.locator('#clear').click();
+    await waitUntil(async () => !(await state()).jobs.length, 'History clear');
+    assert.equal((await worker.evaluate(() => chrome.storage.local.get('history'))).history.jobs.length, 0);
+    assert.ok(fs.existsSync(freshJob.path)); assert.ok(fs.existsSync(signedSaved));
+    assert.deepEqual(errors, []);
+    console.log('PASS real browser restart: done/error/interrupted, settings, missing file, fresh page retry, no secrets, clear preserves files');
     console.log('Native extension smoke: PASS; screenshots:', artifacts);
   } finally {
     if (context) await context.close();

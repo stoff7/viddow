@@ -1,6 +1,9 @@
 """Очередь загрузок для HTTP и Native Messaging. Заголовки не входят в публичный снимок."""
 import itertools
+import os
 import threading
+import time
+import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Optional
@@ -8,7 +11,7 @@ from typing import Optional
 import download
 
 ACTIVE = {"queued", "running", "cancelling"}
-TERMINAL = {"done", "error", "cancelled"}
+TERMINAL = {"done", "error", "cancelled", "interrupted"}
 
 
 class Conflict(ValueError):
@@ -26,13 +29,21 @@ class Job:
     path: Optional[str] = None
     error: Optional[str] = None
     cancel: threading.Event = field(default_factory=threading.Event)
+    restored: bool = False
+    created_at: int = field(default_factory=lambda: int(time.time() * 1000))
 
     def snapshot(self):
         return {"id": self.id, "url": self.url, "name": self.options.get("name"),
                 "status": self.status, "fraction": self.fraction, "label": self.label,
                 "path": self.path, "error": self.error,
                 "format_ids": list(self.options.get("format_ids") or []),
-                "format_label": self.options.get("format_label")}
+                "format_label": self.options.get("format_label"),
+                "page": self.options.get("page") or (self.url if self.options.get("source_kind") == "page" else None),
+                "page_retry": self.options.get("page_retry", False),
+                "restored": self.restored, "created_at": self.created_at,
+                "source_origin": self.options.get("source_origin"),
+                "http_status": self.options.get("http_status"),
+                "file_exists": bool(self.path and os.path.isfile(self.path)) if self.status == "done" else None}
 
 
 class JobManager:
@@ -46,6 +57,43 @@ class JobManager:
         self._ids = itertools.count(1)
         self._executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="download")
         self._closed = False
+
+    def restore_history(self, records):
+        """Восстанавливает только записи: ни одна не поступает в executor."""
+        from contracts import valid_url
+        with self._lock:
+            if self._jobs or not isinstance(records, list):
+                raise ValueError("История восстанавливается только в пустую очередь")
+            for row in records:
+                if not isinstance(row, dict) or type(row.get("id")) is not int or not 0 < row["id"] < 2 ** 53:
+                    raise ValueError("Неверный ID записи истории")
+                if row["id"] in self._jobs or row.get("status") not in ACTIVE | TERMINAL:
+                    raise ValueError("Неверное состояние записи истории")
+                page = row.get("page")
+                if page and not valid_url(page):
+                    raise ValueError("Неверная исходная страница истории")
+                if page:
+                    parsed = urllib.parse.urlsplit(page)
+                    query = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+                    identity = parsed.hostname in {"youtube.com", "www.youtube.com", "m.youtube.com"} and parsed.path == "/watch" and len(query) == 1 and query[0][0] == "v"
+                    if parsed.username or parsed.password or parsed.fragment or (parsed.query and not identity):
+                        raise ValueError("Небезопасная исходная страница истории")
+                origin = row.get("source_origin") or ""
+                if origin and not valid_url(origin):
+                    raise ValueError("Неверный источник истории")
+                path = row.get("path")
+                if path is not None and (not isinstance(path, str) or not os.path.isabs(path) or "\x00" in path):
+                    raise ValueError("Неверный путь файла истории")
+                status = "interrupted" if row["status"] in ACTIVE else row["status"]
+                code = row.get("http_status")
+                error = f"HTTP {code}. Ошибка в предыдущей сессии." if type(code) is int and 400 <= code <= 599 else "Ошибка в предыдущей сессии. Получите свежую ссылку со страницы."
+                job = Job(row["id"], page or origin, {"name": row.get("name") or "Видео", "page": page,
+                    "page_retry": bool(page and row.get("page_retry") is True), "format_label": row.get("format_label"),
+                    "http_status": code, "source_origin": origin}, status=status, path=path if status == "done" else None,
+                    error=error if status == "error" else None, restored=True,
+                    created_at=row.get("created_at", 0), fraction=1 if status == "done" else None)
+                self._jobs[job.id] = job
+            self._ids = itertools.count(max(self._jobs, default=0) + 1)
 
     def add(self, urls, **options):
         with self._lock:
@@ -80,6 +128,8 @@ class JobManager:
     def retry(self, job_id):
         with self._lock:
             job = self._jobs[job_id]
+            if job.restored:
+                raise Conflict("Для старой записи получите свежие форматы со страницы")
             if job.status not in {"error", "cancelled"}:
                 raise Conflict("Повтор доступен только после ошибки или отмены")
             return self.add([job.url], **job.options)[0]

@@ -2,7 +2,8 @@
 
 Все команды выполнять из `/Users/staslisicin/Projects/downloader`.
 
-Актуальные результаты: [verification.md](../docs/verification.md).
+Актуальные результаты: [persistent-history.md](../docs/persistent-history.md);
+история предыдущих этапов: [verification.md](../docs/verification.md).
 
 ## Сначала состояние
 
@@ -25,7 +26,7 @@ node --input-type=module --check < extension/background.js
 node --input-type=module --check < extension/popup.js
 node --check web/app.js
 node --check web/extractor.js
-node --test tests/test_streams.mjs tests/test_formats.mjs
+node --test tests/test_streams.mjs tests/test_formats.mjs tests/test_history.mjs
 git diff --check
 ```
 
