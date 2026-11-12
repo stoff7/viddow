@@ -46,6 +46,12 @@ test('src change and emptied advance generation, invalid duration and image stay
   player.src = 'https://example.test/next-episode';
   assert.equal((await f.read()).media[0].generation, next.generation + 2, 'src changes invalidate even while currentSrc still refers to the old resource');
 });
+test('a recycled feed player changing its poster invalidates the previous media key', async () => {
+  const player = video({ currentSrc: 'blob:https://x.com/stable', poster: 'https://pbs.twimg.com/amplify_video_thumb/123/img/a.jpg' });
+  const f = fixture([player]); const before = (await f.read()).media[0];
+  player.poster = 'https://pbs.twimg.com/amplify_video_thumb/456/img/b.jpg';
+  assert.equal((await f.read()).media[0].generation, before.generation + 1);
+});
 
 test('only requested decoded frames are captured, bounded and released without playback or seeking', async () => {
   const player = video({ readyState: 2, videoWidth: 1920, videoHeight: 1080, play() { throw new Error('play forbidden'); } });

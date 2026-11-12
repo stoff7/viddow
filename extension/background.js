@@ -10,6 +10,9 @@ const STREAM_PATH = /\.(m3u8|mpd)$/i;
 const SKIP_HEADER = /^(range|accept-encoding|host|connection|content-length|if-.*)$/i;
 const sentHeaders = new Map();
 const tabGenerations = new Map(), requestGenerations = new Map();
+// Like the preparation itself, this only guards in-flight work in this worker.
+// A new worker/native session cannot inherit a pending download intention.
+const playerSelections = new Map();
 const key = (tabId) => `tab_${tabId}`;
 let chain = Promise.resolve();
 function update(storageKey, change, afterWrite) {
@@ -58,6 +61,7 @@ chrome.webRequest.onBeforeRequest.addListener((details) => {
   if (details.tabId < 0) return;
   if (details.type === 'main_frame' || !tabGenerations.has(details.tabId)) {
     contextEvidence.delete(details.tabId);
+    playerSelections.delete(details.tabId);
     if (preparation.current?.tabId === details.tabId) { preparation.cancel(); preparation.publish(); }
     tabGenerations.set(details.tabId, crypto.randomUUID());
     updateTab(details.tabId, () => []);
@@ -68,6 +72,7 @@ chrome.webRequest.onCompleted.addListener(details => requestGenerations.delete(d
 chrome.tabs.onRemoved.addListener((tabId) => {
   if (preparation.current?.tabId === tabId) { preparation.cancel(); preparation.publish(); }
   contextEvidence.delete(tabId);
+  playerSelections.delete(tabId);
   tabGenerations.delete(tabId);
   chain = chain.then(() => chrome.storage.session.remove(key(tabId))).catch(console.error);
 });
@@ -261,9 +266,12 @@ const preparation = new VideoPreparation({
 });
 chrome.tabs.onActivated.addListener(info => preparation.clearIntent(info.tabId));
 const previewRequests = new Map();
-async function startInspection(request, message, context) {
+async function startInspection(request, message, context, selectionRevision) {
+  const selectionChanged = () => selectionRevision !== (playerSelections.get(message.tabId)?.revision || 0);
+  if (selectionChanged()) return { skipped: true };
   preparation.cancel(); await preparation.publish();
   const result = await command(request);
+  if (selectionChanged()) return { ...result, skipped: true };
   if (message.item.source_kind === 'page' && context) {
     await preparation.begin({ tabId: message.tabId, page: message.item.url,
       documentToken: context.documentToken, mediaKeys: message.selectedMediaKey ? [message.selectedMediaKey] : context.mediaKeys, selectedMediaKey: message.selectedMediaKey || null, title: message.title || '', session, analysisId: result.analysis_id, download: Boolean(message.downloadAfterPrepare) });
@@ -271,6 +279,15 @@ async function startInspection(request, message, context) {
   return result;
 }
 async function handle(message) {
+  if (message.type === 'player_selection' && Number.isInteger(message.tabId)) {
+    const previous = playerSelections.get(message.tabId);
+    const key = typeof message.key === 'string' ? message.key : null;
+    playerSelections.set(message.tabId, { key, revision: (previous?.revision || 0) + 1 });
+    if (preparation.current?.tabId === message.tabId && (preparation.current.selectedMediaKey || null) !== key) {
+      preparation.cancel(); await preparation.publish();
+    }
+    return {};
+  }
   if (message.type === 'diagnostic') { await recordDiagnostic(message.event, message.fields); return {}; }
   if (message.type === 'diagnostics_read') return { version: chrome.runtime.getManifest().version, entries: await readDiagnostics() };
   if (message.type === 'diagnostics_clear') { await clearDiagnostics(); return {}; }
@@ -291,6 +308,7 @@ async function handle(message) {
       page: message.page || '', referer: item.referer || '', headers: item.headers || {},
       source_kind: item.source_kind || 'auto', stream_kind: item.kind || null };
     if (message.type !== 'inspect') return command(request);
+    const selectionRevision = playerSelections.get(message.tabId)?.revision || 0;
     let context = null;
     if (item.source_kind === 'page' && Number.isInteger(message.tabId)) {
       const started = Date.now(); recordDiagnostic('page_context_start');
@@ -300,7 +318,7 @@ async function handle(message) {
     if (context && context.url !== item.url) { if (message.automatic) return { skipped: true }; context = null; }
     if (message.downloadAfterPrepare && context && await preparation.requestDownload({ tabId: message.tabId,
       page: item.url, session: message.session, selectedMediaKey: message.selectedMediaKey || null, documentToken: context.documentToken })) return { pending_download: true };
-    if (!message.automatic) return startInspection(request, message, context);
+    if (!message.automatic) return startInspection(request, message, context, selectionRevision);
     // Panels share one inspector. An automatic request must not replace a newer
     // source selected in another panel while this request was waiting.
     if (autoInspectPending) return { skipped: true };
@@ -314,7 +332,7 @@ async function handle(message) {
       if (message.session !== session || (analysis?.id || null) !== message.expected_analysis_id
           || ['running', 'cancelling'].includes(analysis?.status) || analysis?.url === item.url || automaticSources.has(key)) return { skipped: true };
       automaticSources.add(key);
-      return await startInspection({ ...request, session: message.session }, message, context);
+      return await startInspection({ ...request, session: message.session }, message, context, selectionRevision);
     } finally { autoInspectPending = false; }
   }
   if (message.type === 'download_selection') {

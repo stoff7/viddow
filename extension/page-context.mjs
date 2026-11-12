@@ -16,7 +16,7 @@ async function collectContext(tabId) {
   const top = documents.find(frame => frame.frameId === 0);
   if (!top) return null;
   const media = visibleMedia(tabId, frames, latest);
-  return { media: media.map(({ key, src, documentId, frameId }) => ({ key, src, documentId, frameId })),
+  return { media: media.map(({ key, src, poster, documentId, frameId }) => ({ key, src, poster, documentId, frameId })),
     mediaKeys: media.filter(media => media.src).map(media => media.key), url: top.result.url,
     documentToken: top.result.documentToken, documents: documents.map(frame => frame.documentId),
     allDocuments: latest.map(frame => frame.documentId).filter(Boolean), hiddenDocuments: hiddenDocuments(latest).map(frame => frame.documentId) };

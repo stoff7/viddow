@@ -1,5 +1,6 @@
 import { canRecoverPageError } from './source-policy.mjs';
 import { streamKey } from './stream-model.mjs';
+import { playerStreamMatch, isXPage } from './player-source.mjs';
 
 // One shared preparation per native inspector. No panel owns the fallback chain.
 export class VideoPreparation {
@@ -7,7 +8,7 @@ export class VideoPreparation {
   async publish() {
     const value = this.current;
     await this.io.publish(value ? { tabId: value.tabId, page: value.page, documentToken: value.documentToken,
-      session: value.session, analysisId: value.analysisId, phase: value.phase, downloadPending: value.download, error: value.error || '' } : null);
+      session: value.session, selectedMediaKey: value.selectedMediaKey || null, analysisId: value.analysisId, phase: value.phase, downloadPending: value.download, error: value.error || '' } : null);
   }
   async begin(value) {
     this.cancel();
@@ -49,7 +50,11 @@ export class VideoPreparation {
     if (!current.active || this.current !== current) return;
     if (state?.session !== current.session || state.analysis?.id !== current.analysisId) return;
     const analysis = state.analysis;
-    this.io.trace?.('prepare_result', { analysis_tag: analysis.id, status: analysis.status, code: analysis.error_code });
+    const resultTrace = JSON.stringify([analysis.id, analysis.status, analysis.error_code]);
+    if (current.resultTrace !== resultTrace) {
+      current.resultTrace = resultTrace;
+      this.io.trace?.('prepare_result', { analysis_tag: analysis.id, status: analysis.status, code: analysis.error_code });
+    }
     if (['running', 'cancelling'].includes(analysis.status)) return;
     if (analysis.status === 'cancelled') { this.cancel(); await this.publish(); return; }
     const context = await this.io.context(current.tabId);
@@ -58,7 +63,10 @@ export class VideoPreparation {
         || context.domAvailable !== false && current.mediaKeys?.some(key => !(context.mediaKeys?.includes(key) || context.media?.some(media => media.key === key)))) {
       this.cancel(); await this.publish(); return;
     }
-    if (analysis.status === 'done') {
+    // A generic page extractor can find a different video in a feed. Only the
+    // selected player's proven network candidates may satisfy its intent.
+    const selectedFeed = current.selectedMediaKey && isXPage(current.page) && !current.fallbackStarted;
+    if (analysis.status === 'done' && !selectedFeed) {
       current.phase = 'done';
       if (current.download) {
         current.download = false;
@@ -75,7 +83,7 @@ export class VideoPreparation {
       }
       await this.publish(); return;
     }
-    if (!canRecoverPageError(current.page, analysis) || current.fallbackStarted) {
+    if ((!(selectedFeed && analysis.status === 'done') && !canRecoverPageError(current.page, analysis)) || current.fallbackStarted) {
       current.phase = 'error'; current.download = false; await this.publish(); return;
     }
     const visible = new Set(context.documents);
@@ -92,21 +100,26 @@ export class VideoPreparation {
       else code = 'missing_scope';
       let eligible = code === 'visible_document' || code === 'current_generation';
       if (eligible && current.selectedMediaKey) {
-        const matches = selected && item.documentId === selected.documentId && item.frameId === selected.frameId &&
-          (/^https?:/.test(selected.src) ? item.url === selected.src : context.media.filter(media => media.documentId === selected.documentId).length === 1);
-        if (!matches) { eligible = false; code = 'explicit_mismatch'; }
+        const match = playerStreamMatch(selected, item, context.media || [], current.page);
+        if (!match) { eligible = false; code = 'explicit_mismatch'; }
+        else if (match === 'player_media_id') code = match;
       }
-      this.io.trace?.('prepare_candidate', { analysis_tag: analysis.id, source_tag: item.traceId, source_index: index,
-        document_tag: item.documentId, frame_id: item.frameId, code });
       return { item, code, eligible };
     });
     const unique = new Map(decisions.filter(value => value.eligible).map(value => value.item)
       .sort((a, b) => (b.lastSeen || 0) - (a.lastSeen || 0)).map(item => [streamKey(item), item]));
     const candidates = [...unique.values()].slice(0, 6);
-    this.io.trace?.('prepare_candidates', { analysis_tag: analysis.id, candidates_count: items.length,
+    const decisionTrace = JSON.stringify([analysis.id, current.selectedMediaKey, decisions.map(({ item, code }) => [streamKey(item), code])]);
+    const changed = current.decisionTrace !== decisionTrace;
+    if (changed) {
+      current.decisionTrace = decisionTrace;
+      decisions.forEach(({ item, code }, index) => this.io.trace?.('prepare_candidate', { analysis_tag: analysis.id,
+        source_tag: item.traceId, source_index: index, document_tag: item.documentId, frame_id: item.frameId, code }));
+      this.io.trace?.('prepare_candidates', { analysis_tag: analysis.id, candidates_count: items.length,
       eligible_count: candidates.length, visible_count: decisions.filter(value => value.code === 'visible_document').length, hidden_count: decisions.filter(value => value.code === 'hidden_document').length,
       unbound_count: decisions.filter(value => value.code === 'current_generation').length,
       rejected_count: decisions.filter(value => !value.eligible).length });
+    }
     if (!candidates.length) {
       current.phase = items.length ? 'blocked' : 'waiting';
       current.error = items.length ? decisions.every(value => value.code === 'hidden_document')
@@ -117,7 +130,7 @@ export class VideoPreparation {
             ? 'Видео обнаружено. Найденный адрес не связан с выбранным плеером.'
             : 'Видео обнаружено, но пока не удалось подтвердить актуальность найденного адреса для этой страницы.' : '';
       if (items.length) current.download = false;
-      this.io.trace?.('prepare_waiting', { analysis_tag: analysis.id, candidates_count: items.length, code: items.length ? 'excluded_streams' : 'no_streams' });
+      if (changed) this.io.trace?.('prepare_waiting', { analysis_tag: analysis.id, candidates_count: items.length, code: items.length ? 'excluded_streams' : 'no_streams' });
       await this.publish(); return;
     }
     current.error = '';

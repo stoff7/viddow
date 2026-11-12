@@ -20,7 +20,7 @@
   }
   function identity(video) {
     const src = video.currentSrc || video.src || '';
-    const signature = JSON.stringify([video.currentSrc || '', video.src || '', ...[...(video.querySelectorAll?.('source') || [])].map(node => node.src)]);
+    const signature = JSON.stringify([video.currentSrc || '', video.src || '', video.poster || '', ...[...(video.querySelectorAll?.('source') || [])].map(node => node.src)]);
     let value = identities.get(video);
     if (!value) { value = { id: ++sequence, generation: 0, src, signature }; identities.set(video, value); }
     if (value.signature !== signature) { value.signature = signature; value.generation++; }

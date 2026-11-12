@@ -25,7 +25,7 @@ CODES = frozenset('''host_not_found timeout protocol_mismatch connection_lost co
 embedded_source_error analysis_timeout network_timeout network_tls network authentication_required browser_session_unavailable drm
 expired_link destination_permission destination_full destination_unavailable access_denied source_unavailable
 rate_limited missing_dependency download_error visible_document current_generation hidden_document stale_generation
-missing_scope explicit_mismatch no_streams excluded_streams missing_context'''.split())
+missing_scope explicit_mismatch player_media_id no_streams excluded_streams missing_context'''.split())
 COUNTS = frozenset('''elapsed_ms candidates_count eligible_count visible_count hidden_count unbound_count
 rejected_count formats_count bytes_count jobs_count job_id tab_id source_index line column'''.split())
 IDS = frozenset(('analysis_tag', 'source_tag', 'candidate_tag', 'document_tag', 'attempt_tag'))

@@ -157,3 +157,38 @@ test('temporary DOM loss does not invalidate a media key while the browser epoch
   f.preparation.observe(); await settle(f.preparation);
   assert.equal(f.calls.filter(([name]) => name === 'download').length, 1);
 });
+
+test('three X blob players and thirteen streams download only the selected poster media group', async () => {
+  const groups = ['2119187441865109504', '2120833987295801344', '2120022956982038529'];
+  for (const selectedIndex of [0, 1, 2]) {
+    const f = fixture();
+    f.context = { url: 'https://x.com/', documentToken: 'doc', documents: ['visible'],
+      mediaKeys: groups.map((_, i) => `player-${i}`), media: groups.map((id, i) => ({
+        key: `player-${i}`, src: `blob:https://x.com/${i}`, poster: `https://pbs.twimg.com/amplify_video_thumb/${id}/img/cover.jpg`, documentId: 'visible', frameId: 2 })) };
+    f.items = groups.flatMap((id, i) => Array.from({ length: i === 0 ? 3 : 5 }, (_, j) => ({
+      ...stream(`https://video.twimg.com/amplify_video/${id}/pl/${j}.m3u8?token=${i}`), headers: { 'X-Player': String(i) } })));
+    await f.preparation.begin({ session: 'session', tabId: 1, page: 'https://x.com/', documentToken: 'doc', analysisId: 'page',
+      selectedMediaKey: `player-${selectedIndex}`, mediaKeys: [`player-${selectedIndex}`], download: true });
+    await settle(f.preparation); await new Promise(resolve => setTimeout(resolve, 380)); await settle(f.preparation);
+    const request = f.calls.find(([name]) => name === 'inspect')[1];
+    assert.equal(request.fallbacks.length, selectedIndex === 0 ? 3 : 5);
+    assert.ok(request.fallbacks.every(value => value.urls[0].includes(`/${groups[selectedIndex]}/`) && value.headers['X-Player'] === String(selectedIndex)));
+    f.state = { session: 'session', analysis: { id: 'fallback', status: 'done', result: { source_id: groups[selectedIndex], recommended_format_ids: ['720'] } } };
+    f.preparation.observe(); await settle(f.preparation);
+    assert.equal(f.calls.find(([name]) => name === 'download')[1].source_id, groups[selectedIndex]);
+  }
+});
+
+test('unchanged blocked candidates do not flood the log or evict useful events', async () => {
+  const f = fixture(), events = [];
+  f.preparation.io.trace = (event, fields) => events.push({ event, ...fields });
+  f.context = { url: 'https://page.test/', documentToken: 'doc', documents: ['visible'], hiddenDocuments: ['hidden'] };
+  f.items = [stream('https://cdn.test/hidden', 'hidden')];
+  await f.begin(false); await settle(f.preparation);
+  for (let i = 0; i < 20; i++) { f.preparation.observe(); await settle(f.preparation); }
+  for (const name of ['prepare_result', 'prepare_candidate', 'prepare_candidates', 'prepare_waiting']) assert.equal(events.filter(value => value.event === name).length, 1, name);
+  f.items = [stream('https://cdn.test/another', 'hidden')];
+  f.preparation.observe(); await settle(f.preparation);
+  assert.equal(events.filter(value => value.event === 'prepare_candidate').length, 2);
+  f.preparation.cancel();
+});

@@ -14,6 +14,7 @@ let tab = null, tabKey = '', items = [], state = { jobs: [], settings: {} }, onl
 let filter = 'all', settingsDirty = false, refreshRevision = 0, hostRevision = 0;
 let analysisKey = '', dismissedAnalysis = '', inspectPending = false, selectionPending = false;
 let currentDownload = null, preparationState = null, selectedVideoId = '';
+let playerNeedsPreparation = false;
 const videoPreviews = new Map(), videoPreviewPending = new Set();
 let currentCandidates = [], imageWindowKeys = [], imageScrollTimer;
 let previewRevision = 0, selectedMedia = null, previewDocument = null;
@@ -105,7 +106,7 @@ function clearPreview() {
 async function refreshPreview() {
   const revision = ++previewRevision, current = tab;
   const key = `${current?.id}:${current?.url}`;
-  if (key !== previewKey) { imageWindowKeys = []; $('playerImages').replaceChildren(); $('playerChoice').hidden = true; previewKey = key; pagePreview = null; selectedMedia = null; previewDocument = null; clearPreview(); }
+  if (key !== previewKey) { imageWindowKeys = []; $('playerImages').replaceChildren(); $('playerChoice').hidden = true; previewKey = key; pagePreview = null; selectedMedia = null; playerNeedsPreparation = false; previewDocument = null; clearPreview(); }
   if (!validUrl(current?.url) || $('currentPage').hidden) return;
   try {
     const target = { tabId: current.id, allFrames: true };
@@ -141,7 +142,7 @@ async function refreshPreview() {
     }
     picker.hidden = candidates.length < 2 && !selectedMedia;
     picker.value = chosen?.key || '';
-    picker.onchange = () => { selectedMedia = { key: picker.value || '__unavailable__' }; clearPreview(); refreshPreview(); };
+    picker.onchange = () => choosePlayer(picker.value || '__unavailable__');
     // Page artwork stays page artwork, and never fills a missing player poster.
     const hasAnyMedia = frames.some(frame => frame.result?.media?.length);
     const preview = chosen || { poster: !hasAnyMedia && !selectedMedia ? page.pageImage : '', posterSource: 'page', duration: !hasAnyMedia && !selectedMedia ? page.pageDuration : null, durationSource: 'page' };
@@ -191,7 +192,7 @@ function renderPlayerImages(candidates, chosen) {
       const missing = el('span', 'player-image-missing', 'Кадр недоступен');
       img.onerror = () => { img.hidden = true; missing.hidden = false; };
       button.append(img, missing, el('span'));
-      button.onclick = () => { selectedMedia = { key: media.key }; clearPreview(); refreshPreview(); };
+      button.onclick = () => choosePlayer(media.key);
       container.append(button);
     }
     const [img, missing, label] = button.children;
@@ -260,10 +261,13 @@ async function start(item, title = '', page = '') {
 async function inspect(item, title = '', page = '', automatic = false, downloadAfterPrepare = false) {
   if (!automatic && item.kind) { selectedMedia = { url: item.url, frameId: item.frameId, documentId: item.documentId }; clearPreview(); refreshPreview(); }
   inspectPending = true; controls(); notice('');
+  const selectedAtStart = selectedMedia?.key || null;
   try {
     const result = await send({ type: 'inspect', item, title, page, automatic, downloadAfterPrepare, selectedMediaKey: selectedMedia?.key || null, tabId: tab?.id,
       session: state.session, expected_analysis_id: state.analysis?.id || null });
     if (result.skipped) return;
+    if ((selectedMedia?.key || null) !== selectedAtStart) return;
+    if (!automatic) playerNeedsPreparation = false;
     dismissedAnalysis = ''; renderAnalysis();
     if (!automatic) { view('streams'); $('analysisStatus').focus(); }
   } catch (error) { notice(error.message, true); }
@@ -272,8 +276,18 @@ async function inspect(item, title = '', page = '', automatic = false, downloadA
 function currentPreparation() {
   const current = preparationState;
   if (!current || current.session !== state.session || current.tabId !== tab?.id || current.page !== tab?.url) return null;
+  if ((current.selectedMediaKey || null) !== (selectedMedia?.key || null)) return null;
   if (current.analysisId !== state.analysis?.id && !(current.phase === 'recovering' && state.analysis?.page === current.page)) return null;
   return current;
+}
+async function choosePlayer(key) {
+  selectedMedia = { key };
+  playerNeedsPreparation = true;
+  if (state.analysis) dismissedAnalysis = `${state.session}:${state.analysis.id}`;
+  clearPreview(); renderAnalysis(); controls();
+  try { await send({ type: 'player_selection', tabId: tab?.id, key }); }
+  catch (error) { notice(error.message, true); }
+  refreshPreview();
 }
 function recovering() { const current = currentPreparation(); return ['waiting', 'blocked', 'recovering'].includes(current?.phase) || current?.phase === 'page' && canRecoverPageError(tab?.url, state.analysis); }
 function videoResult() {
@@ -346,14 +360,15 @@ function updateFormatChoice() {
   const { main, audio } = selectedFormats();
   const problem = choiceProblem(main, audio, state.tools?.ffmpeg, $('silentVideo').checked);
   $('audioChoices').hidden = main?.kind !== 'video';
-  $('downloadFormat').disabled = !online || state.analysis?.status !== 'done' || Boolean(problem) || selectionPending || Boolean(currentPreparation()?.downloadPending);
+  $('downloadFormat').disabled = !online || state.analysis?.status !== 'done'
+    || playerNeedsPreparation || `${state.session}:${state.analysis?.id}` === dismissedAnalysis || Boolean(problem) || selectionPending || Boolean(currentPreparation()?.downloadPending);
   $('formatDetails').textContent = main ? [formatLabel(main), ...audio.map(id => formatLabel(videoResult().formats.find(format => format.id === id)))].join('\n') : '';
   $('formatHint').textContent = !online ? 'Подключите локальный помощник, чтобы скачать выбранное.' : problem || (main?.kind === 'combined' ? 'Звук уже встроен в этот формат.' : main?.kind === 'unknown'
     ? 'Состав дорожек не указан источником. Скачается выбранный формат.' : $('silentVideo').checked ? 'Будет сохранено видео без звука.' : main?.kind === 'audio' ? 'Будет сохранён только звук.' : 'Будут сохранены выбранные дорожки.');
 }
 function renderAnalysis() {
   const analysis = state.analysis;
-  const visible = Boolean(analysis && `${state.session}:${analysis.id}` !== dismissedAnalysis);
+  const visible = Boolean(analysis && !playerNeedsPreparation && `${state.session}:${analysis.id}` !== dismissedAnalysis);
   const running = ['running', 'cancelling'].includes(analysis?.status) || recovering();
   const preparingPage = visible && running && (analysis.url === tab?.url || recovering());
   $('analysisCard').hidden = !visible;
