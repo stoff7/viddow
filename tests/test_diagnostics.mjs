@@ -11,6 +11,7 @@ test('diagnostics only retain approved event codes and numeric/source fields', (
   assert.deepEqual(diagnosticEntry('command_error', { command: 'private-command', code: 'Cookie: secret', elapsed_ms: -1 }, 123), { time: 123, event: 'command_error' });
   assert.doesNotThrow(() => diagnosticEntry('panel_error', null));
   assert.deepEqual(diagnosticEntry('page_context_unavailable', { elapsed_ms: 3000, url: 'https://private.test/' }, 123), { time: 123, event: 'page_context_unavailable', elapsed_ms: 3000 });
+  assert.deepEqual(diagnosticEntry('prepare_candidate', { code: 'missing_scope', source_tag: 'a'.repeat(32), document_tag: 'https://private.test/', frame_id: -1, url: 'https://private.test/?token=secret' }, 123), { time: 123, event: 'prepare_candidate', code: 'missing_scope', frame_id: -1, source_tag: 'a'.repeat(32) });
   assert.equal(diagnosticCode('Native host not found'), 'host_not_found');
   assert.equal(diagnosticCode('Помощник не ответил'), 'timeout');
 });

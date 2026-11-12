@@ -1,3 +1,9 @@
+// Session storage survives a service-worker restart; its tab cache is cleared on
+// main-document navigation. Recover one consistent epoch without mixing sources.
+export function storedTabGeneration(items) {
+  const generations = new Set(items.map(item => item.tabGeneration));
+  return generations.size === 1 && typeof [...generations][0] === 'string' && [...generations][0] ? [...generations][0] : null;
+}
 export function streamKey(item) {
   return JSON.stringify([item.tabGeneration ?? null, item.documentId ?? null, item.frameId ?? null, item.url]);
 }
@@ -5,6 +11,7 @@ export function streamKey(item) {
 export function rememberStream(items, item, limit = 30) {
   const previous = items.find((entry) => streamKey(entry) === streamKey(item));
   const merged = { ...previous, ...item,
+    traceId: previous?.traceId || item.traceId,
     headers: item.headers ?? previous?.headers,
     firstSeen: previous?.firstSeen ?? item.lastSeen,
     seen: (previous?.seen || 0) + 1 };

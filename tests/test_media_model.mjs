@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { visibleMedia, selectMedia } from '../extension/media-model.mjs';
+import { visibleMedia, selectMedia, hiddenDocuments } from '../extension/media-model.mjs';
 const media = (id = 1, src = 'https://cdn.test/one.m3u8?token=full') => ({ id, generation: 0, src, visible: true, duration: 10 });
 const frame = (id, token, videos = [], children = []) => ({ frameId: id, documentId: `doc-${token}`,
   result: { documentToken: token, media: videos, children } });
@@ -35,4 +35,10 @@ test('late old series/document/tab cannot fulfill the selected key', () => {
   assert.equal(selectMedia(visibleMedia(7, latest), { key: old.key }), null);
   assert.equal(selectMedia(visibleMedia(8, frames), { key: old.key }), null);
   assert.equal(visibleMedia(7, frames, [frame(0, 'new', [media()])]).length, 0);
+});
+
+test('a known hidden iframe excludes all of its descendants without guessing by frame order', () => {
+  const frames = [frame(0, 'top', [], [edge('visible'), edge('hidden', false)]),
+    frame(1, 'visible', [media()]), frame(2, 'hidden', [], [edge('nested')]), frame(3, 'nested', [media()])];
+  assert.deepEqual(hiddenDocuments(frames).map(frame => frame.documentId), ['doc-hidden', 'doc-nested']);
 });

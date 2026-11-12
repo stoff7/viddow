@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { rememberStream, groupStreams } from '../extension/stream-model.mjs';
+import { rememberStream, groupStreams, storedTabGeneration } from '../extension/stream-model.mjs';
 
 test('full URL is deduplicated with current headers', () => {
   const first = { url: 'https://cdn.example/a/master.m3u8?t=one', kind: 'HLS', headers: { Cookie: 'old' }, lastSeen: 1 };
@@ -48,4 +48,11 @@ test('same URL in different documents keeps separate headers and groups', () => 
   assert.equal(items.length, 2);
   assert.equal(items[0].headers.Cookie, 'one');
   assert.equal(groupStreams(items).length, 2);
+});
+
+test('worker restart restores only one consistent stored tab generation', () => {
+  assert.equal(storedTabGeneration([{ tabGeneration: 'same' }, { tabGeneration: 'same' }]), 'same');
+  for (const values of [[], [{}], [{ tabGeneration: 'old' }, { tabGeneration: 'new' }], [{ tabGeneration: 'same' }, {}]]) {
+    assert.equal(storedTabGeneration(values), null);
+  }
 });

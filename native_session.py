@@ -11,6 +11,8 @@ import download
 from contracts import download_options
 from jobs import JobManager
 from inspector import Inspector
+from trace_log import trace_event
+from diagnostics import describe_error
 from source_auth import cookie_browser_from
 
 
@@ -57,7 +59,9 @@ class Session:
                 raise ValueError("Сессия загрузок изменилась. Обновите список задач.")
             command = message.get("command")
             result = {}
+            trace_event("command_start", command=command, analysis_tag=message.get("analysis_id"), source_tag=message.get("source_id"))
             if command == "download":
+                trace_event("download_requested", analysis_tag=message.get("analysis_id"), source_tag=message.get("source_id"))
                 if message.get("analysis_id") is not None:
                     urls, options = self.inspector.selection(message["analysis_id"], message.get("format_ids"), message.get("source_id"))
                 else:
@@ -65,6 +69,7 @@ class Session:
                     if self.youtube_browser != "none":
                         options["cookie_browser"] = self.youtube_browser
                 result = {"ids": self.manager.add(urls, **options)}
+                trace_event("download_queued", jobs_count=len(result["ids"]), job_id=result["ids"][0] if result["ids"] else 0)
             elif command == "inspect":
                 urls, options = download_options(message)
                 if len(urls) != 1:
@@ -79,6 +84,7 @@ class Session:
                     candidate_urls, candidate_options = download_options(item)
                     if len(candidate_urls) != 1 or candidate_options.get('stream_kind') not in ('HLS', 'DASH'):
                         raise ValueError('Для подготовки нужен один HLS/DASH источник')
+                    candidate_options['_trace_tag'] = item.get('trace_tag')
                     fallbacks.append({'url': candidate_urls[0], 'options': candidate_options})
                 fallback_only = message.get('fallback_only', False)
                 if type(fallback_only) is not bool or fallback_only and not fallbacks:
@@ -92,7 +98,8 @@ class Session:
                 def respond(done):
                     try:
                         self.send({'type': 'reply', 'request_id': request_id, 'ok': True, 'result': done.result()})
-                    except Exception:
+                    except Exception as error:
+                        trace_event('preview_error', analysis_tag=identifier, source_tag=source_id, code=describe_error(error)[0])
                         self.send({'type': 'reply', 'request_id': request_id, 'ok': False, 'error': 'Превью недоступно для этого видео.'})
                 future.add_done_callback(respond)
                 return
@@ -138,8 +145,10 @@ class Session:
             # Снимок перед reply позволяет worker сохранить историю до подтверждения UI.
             with self._publish_lock:
                 self.send(self.state())
+            trace_event("command_ok", command=command)
             self.send({"type": "reply", "request_id": request_id, "ok": True, "result": result})
         except Exception as error:
+            trace_event("command_error", command=message.get("command"), code=describe_error(error)[0])
             self.send({"type": "reply", "request_id": request_id, "ok": False,
                        "error": "Задача не найдена" if isinstance(error, KeyError) else str(error)})
 
@@ -156,6 +165,7 @@ class Session:
                         previous = current
                 stopped.wait(0.25)
 
+        trace_event("host_ready")
         self.send({**self.state(), "type": "ready", "protocol": 2})
         reporter = threading.Thread(target=report, daemon=True)
         reporter.start()
@@ -165,8 +175,12 @@ class Session:
                 if message is None:
                     break
                 if isinstance(message, dict):
-                    self.handle(message)
+                    if message.get('type') == 'trace':
+                        trace_event(message.get('event'), message.get('fields'), origin='extension')
+                    else:
+                        self.handle(message)
         finally:
+            trace_event("host_disconnect")
             stopped.set()
             reporter.join()
             self.inspector.stop()

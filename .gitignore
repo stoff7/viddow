@@ -9,3 +9,6 @@ venv/
 
 # Локальные ссылки на видео не публикуются.
 urls.txt
+
+# Redacted local runtime diagnostics.
+logs/

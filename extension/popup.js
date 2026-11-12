@@ -273,7 +273,7 @@ function currentPreparation() {
   if (current.analysisId !== state.analysis?.id && !(current.phase === 'recovering' && state.analysis?.page === current.page)) return null;
   return current;
 }
-function recovering() { const current = currentPreparation(); return ['waiting', 'recovering'].includes(current?.phase) || current?.phase === 'page' && state.analysis?.error_code === 'unsupported_source'; }
+function recovering() { const current = currentPreparation(); return ['waiting', 'blocked', 'recovering'].includes(current?.phase) || current?.phase === 'page' && state.analysis?.error_code === 'unsupported_source'; }
 function videoResult() {
   const result = state.analysis?.result;
   return result?.videos?.find(video => video.id === selectedVideoId) || result;

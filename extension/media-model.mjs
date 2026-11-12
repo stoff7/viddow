@@ -16,6 +16,18 @@ export function visibleDocuments(frames, latest = frames) {
   visit(top);
   return frames.filter(frame => reachable.has(frame.result?.documentToken));
 }
+export function hiddenDocuments(frames) {
+  const byToken = new Map(frames.filter(frame => frame.result?.documentToken).map(frame => [frame.result.documentToken, frame]));
+  const hidden = new Set();
+  function hide(token) {
+    const frame = byToken.get(token);
+    if (!frame || frame.frameId === 0 || hidden.has(token)) return;
+    hidden.add(token);
+    for (const edge of frame.result.children || []) hide(edge.documentToken);
+  }
+  for (const frame of frames) for (const edge of frame.result?.children || []) if (!edge.visible) hide(edge.documentToken);
+  return frames.filter(frame => hidden.has(frame.result?.documentToken));
+}
 export function visibleMedia(tabId, frames, latest = frames) {
   const reachable = new Set(visibleDocuments(frames, latest).map(frame => frame.result.documentToken));
   const fresh = new Map(latest.map(frame => [frame.result?.documentToken, frame]));

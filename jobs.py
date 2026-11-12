@@ -10,6 +10,7 @@ from typing import Optional
 
 import download
 from diagnostics import describe_error
+from trace_log import trace_event
 
 ACTIVE = {"queued", "running", "cancelling"}
 TERMINAL = {"done", "error", "cancelled", "interrupted"}
@@ -160,6 +161,7 @@ class JobManager:
             if job.cancel.is_set():
                 return
             job.status, job.label = "running", "Подготовка…"
+            trace_event("job_start", job_id=job.id, status="running")
 
         def progress(fraction, label):
             download.check_cancel(job.cancel)
@@ -182,13 +184,16 @@ class JobManager:
             with self._lock:
                 # Возвращённый путь означает готовый файл, даже если отмена пришла на финише.
                 job.path, job.status, job.fraction, job.label = path, "done", 1, "Сохранено"
+                trace_event("job_done", job_id=job.id, status="done")
         except Exception as error:
             with self._lock:
                 if isinstance(error, download.Cancelled) or job.cancel.is_set():
                     job.status, job.label, job.error = "cancelled", "Отменено", None
+                    trace_event("job_cancelled", job_id=job.id, status="cancelled")
                 else:
                     job.status, job.label = "error", "Не удалось скачать"
                     job.error_code, job.error = describe_error(error)
+                    trace_event("job_error", job_id=job.id, status="error", code=job.error_code)
                     job.error_detail = str(error)[:16384]
 
     def close(self):

@@ -20,6 +20,7 @@ async function waitFor(fn, title, timeout = 45000) {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'viddow-auto-native-'));
   const profile = path.join(temp, 'profile'), output = path.join(temp, 'Downloads'); fs.mkdirSync(output);
   const requests = [], errors = []; let context, server;
+  process.env.VIDDOW_TRACE_FILE = path.join(temp, 'trace.jsonl');
   const artifacts = process.env.VIDDOW_ARTIFACTS || '/tmp/viddow-auto-native'; fs.mkdirSync(artifacts, { recursive: true });
   try {
     for (const [name, size, color] of [['high', '1280x720', 'blue'], ['unknown', '160x90', 'green']]) {
@@ -32,7 +33,9 @@ async function waitFor(fn, title, timeout = 45000) {
     server = http.createServer((request, response) => {
       const url = new URL(request.url, 'http://fixture'); requests.push({ path: request.url, headers: request.headers });
       let data, type = 'text/html; charset=utf-8';
-      if (['/', '/early', '/second'].includes(url.pathname)) {
+      if (url.pathname === '/' && url.searchParams.has('manifest')) {
+        type = 'application/vnd.apple.mpegurl'; data = '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=921000,RESOLUTION=1280x720,CODECS="avc1.42e01f,mp4a.40.2"\n/high.m3u8?token=high\n';
+      } else if (['/', '/early', '/second'].includes(url.pathname)) {
         data = '<!doctype html><title>Выбранная серия</title><video style="width:320px;height:180px" controls></video><script src="/app.js"></script>';
       } else if (url.pathname === '/app.js') {
         type = 'application/javascript'; data = `window.discover = async () => { await Promise.all(['unknown', 'high'].map(name => fetch('/'+name+'/master.m3u8?token='+name, {headers: {'X-Video':name}}))); document.querySelector('video').poster='/poster.svg'; }; if(location.pathname!='/early') discover();`;
@@ -106,6 +109,26 @@ async function waitFor(fn, title, timeout = 45000) {
     await source.evaluate(() => window.discover());
     await waitFor(async () => (await state()).jobs.length === 3 && (await state()).jobs[2].status === 'done', 'Pending one-click download failed: ' + JSON.stringify(await state()));
     assert.match((await state()).jobs[2].url, /\/high\/master.m3u8/);
+    // One observed stream, no extension and no DOM document mapping: exactly the
+    // case that used to remain in "waiting" despite a usable captured address.
+    await source.goto(base + '/early?unbound-source=1');
+    await source.evaluate(() => fetch('/?manifest=1', { headers: { 'X-Video': 'high' } }).then(response => response.text()));
+    const tabId = await worker.evaluate(async url => (await chrome.tabs.query({})).find(tab => tab.url === url).id, source.url());
+    await waitFor(async () => worker.evaluate(async tabId => ((await chrome.storage.session.get(`tab_${tabId}`))[`tab_${tabId}`] || []).some(item => item.url.includes('?manifest=1')), tabId), 'Source not captured');
+    await worker.evaluate(async tabId => {
+      const key = `tab_${tabId}`, items = (await chrome.storage.session.get(key))[key];
+      await chrome.storage.session.set({ [key]: items.map(item => ({ ...item, documentId: undefined, frameId: -1 })) });
+    }, tabId);
+    await panel.locator('#closeAnalysis').click();
+    await panel.locator('#inspectPage').click();
+    await waitFor(async () => (await state()).jobs.length === 4 && (await state()).jobs[3].status === 'done', 'Fresh unbound stream was never downloaded');
+    assert.equal((await state()).jobs[3].url, base + '/?manifest=1');
+    const records = fs.readFileSync(process.env.VIDDOW_TRACE_FILE, 'utf8');
+    assert.ok(records.split('\n').filter(Boolean).map(line => JSON.parse(line)).some(row => row.event === 'prepare_candidate' && row.code === 'current_generation'));
+    assert.ok(records.includes('"event":"job_done"'));
+    assert.equal(records.includes('token='), false);
+    assert.equal(records.includes('X-Video'), false);
+    assert.equal(records.includes(base), false);
     // Regression: the DOM bridge can fail to answer before native inspection starts.
     // The worker deadline must still release the panel and let the page analysis end.
     await source.goto(base + '/early?stalled-context=1');
@@ -125,7 +148,8 @@ async function waitFor(fn, title, timeout = 45000) {
     const log = await worker.evaluate(async () => (await chrome.storage.session.get('diagnosticLog')).diagnosticLog);
     assert.ok(log.some(row => row.event === 'page_context_unavailable' && row.elapsed_ms >= 2800), 'context timeout must be visible without URLs in diagnostics');
     assert.deepEqual(errors, []);
-    console.log('PASS real automatic fallback: two candidates, 720p+sound recommendation, GIF, two panels, exact-source download, alternative choice, early one-click intent, stalled DOM bridge deadline');
+    fs.copyFileSync(process.env.VIDDOW_TRACE_FILE, path.join(artifacts, 'trace.jsonl'));
+    console.log('PASS real automatic fallback: two candidates, 720p+sound recommendation, GIF, two panels, exact-source download, alternative choice, early one-click intent, stalled DOM bridge deadline, fresh unbound root manifest, redacted file logs');
     console.log('Artifacts: ' + artifacts);
   } finally {
     await context?.close(); if (server) await new Promise(resolve => server.close(resolve)); fs.rmSync(temp, { recursive: true, force: true });

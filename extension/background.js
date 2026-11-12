@@ -1,8 +1,8 @@
 import { VideoPreparation } from './preparation.mjs';
 import { pageContext } from './page-context.mjs';
-import { rememberStream, groupStreams } from './stream-model.mjs';
+import { rememberStream, groupStreams, storedTabGeneration } from './stream-model.mjs';
 import { decodeHistory, historyFromJobs } from './history-model.mjs';
-import { recordDiagnostic, readDiagnostics, clearDiagnostics, diagnosticCode } from './diagnostics.mjs';
+import { recordDiagnostic, readDiagnostics, clearDiagnostics, diagnosticCode, setDiagnosticSink } from './diagnostics.mjs';
 
 const HOST = 'local.video_downloader';
 const STREAM_TYPE = /mpegurl|dash\+xml/i;
@@ -46,9 +46,12 @@ chrome.webRequest.onHeadersReceived.addListener((details) => {
   if (details.statusCode >= 400 || (!STREAM_TYPE.test(contentType) && !STREAM_PATH.test(path))) return;
   const item = { url: details.url, kind: /dash|\.mpd$/i.test(contentType + path) ? 'DASH' : 'HLS',
     referer: details.initiator && /^https?:/.test(details.initiator) ? details.initiator + '/' : '',
-    tabGeneration: generation, frameId: details.frameId, documentId: details.documentId,
+    traceId: crypto.randomUUID().replaceAll('-', ''), tabGeneration: generation, frameId: details.frameId, documentId: details.documentId,
     parentFrameId: details.parentFrameId, headers, lastSeen: details.timeStamp || Date.now() };
-  updateTab(details.tabId, (items) => generation === tabGenerations.get(details.tabId) ? rememberStream(items, item) : items);
+  updateTab(details.tabId, (items) => generation === tabGenerations.get(details.tabId) ? rememberStream(items, item) : items).then(items => {
+    const source = items.find(entry => entry.url === item.url && entry.documentId === item.documentId);
+    if (source) recordDiagnostic('stream_seen', { source_tag: source.traceId, document_tag: source.documentId, frame_id: source.frameId, tab_id: details.tabId, kind: source.kind, candidates_count: items.length });
+  });
 }, { urls: ['<all_urls>'], types: ['xmlhttprequest', 'media', 'other'] }, ['responseHeaders']);
 // Чистим до запросов нового документа, чтобы поздний ответ навигации не удалял новые потоки.
 chrome.webRequest.onBeforeRequest.addListener((details) => {
@@ -149,6 +152,7 @@ async function ensureHost() {
             previewRequests.clear();
             preparation.cancel(); preparation.publish();
             session = message.session;
+            readDiagnostics().then(entries => entries.forEach(forwardTrace));
           } else if (!ready || message.session !== session) return;
           const saved = update('nativeState', () => message, persistHistory);
           const analysisKey = message.analysis ? `${message.analysis.id}:${message.analysis.status}` : '';
@@ -209,9 +213,32 @@ async function command(message) {
     }
   });
 }
+const forwardedTrace = new Set();
+function forwardTrace(entry) {
+  if (!port || !session) return;
+  const key = JSON.stringify(entry);
+  if (forwardedTrace.has(key)) return;
+  port.postMessage({ type: 'trace', event: entry.event, fields: entry });
+  forwardedTrace.add(key);
+  while (forwardedTrace.size > 400) forwardedTrace.delete(forwardedTrace.values().next().value);
+}
+setDiagnosticSink(forwardTrace);
+async function tabContext(tabId) {
+  if (!tabGenerations.has(tabId)) {
+    const stored = (await chrome.storage.session.get(key(tabId)))[key(tabId)] || [];
+    // A navigation/request may have initialized the newer epoch while storage
+    // was being read. Never overwrite that event with a cached older value.
+    if (!tabGenerations.has(tabId)) tabGenerations.set(tabId, storedTabGeneration(stored) || crypto.randomUUID());
+  }
+  const generation = tabGenerations.get(tabId);
+  const context = await pageContext(tabId);
+  if (!context || generation !== tabGenerations.get(tabId)) return null;
+  return { ...context, tabGeneration: generation };
+}
 const preparation = new VideoPreparation({
   state: async () => (await chrome.storage.session.get('nativeState')).nativeState,
-  context: pageContext,
+  context: tabContext,
+  trace: recordDiagnostic,
   streams: async tabId => (await chrome.storage.session.get(key(tabId)))[key(tabId)] || [],
   inspect: request => command({ command: 'inspect', ...request }),
   download: request => command({ command: 'download', ...request }),
@@ -255,7 +282,7 @@ async function handle(message) {
     let context = null;
     if (item.source_kind === 'page' && Number.isInteger(message.tabId)) {
       const started = Date.now(); recordDiagnostic('page_context_start');
-      context = await pageContext(message.tabId);
+      context = await tabContext(message.tabId);
       recordDiagnostic(context ? 'page_context_ready' : 'page_context_unavailable', { elapsed_ms: Date.now() - started });
     }
     if (context && context.url !== item.url) { if (message.automatic) return { skipped: true }; context = null; }

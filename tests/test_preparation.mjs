@@ -91,3 +91,45 @@ test('a late rejected fallback cannot mark a newer preparation as failed', async
   assert.equal(f.preparation.current.error, undefined);
   f.preparation.cancel();
 });
+
+test('a fresh captured manifest without DOM document identity is analyzed and downloaded once', async () => {
+  const f = fixture(); const events = [];
+  f.preparation.io.trace = (event, fields) => events.push({ event, ...fields });
+  f.context = { url: 'https://page.test/', documentToken: 'doc', documents: ['visible'], tabGeneration: 'current' };
+  f.items = [{ url: 'https://vd.example/?signed=complete', kind: 'HLS', frameId: -1, tabGeneration: 'current',
+    headers: { Cookie: 'keep-this-context' }, traceId: 'a'.repeat(32) }];
+  await f.begin(true); await settle(f.preparation);
+  await new Promise(resolve => setTimeout(resolve, 380)); await settle(f.preparation);
+  const inspection = f.calls.find(([name]) => name === 'inspect')[1];
+  assert.equal(inspection.fallbacks.length, 1);
+  assert.equal(inspection.fallbacks[0].urls[0], 'https://vd.example/?signed=complete');
+  assert.equal(inspection.fallbacks[0].headers.Cookie, 'keep-this-context');
+  assert.ok(events.some(row => row.event === 'prepare_candidate' && row.code === 'current_generation'));
+  f.state = { session: 'session', analysis: { id: 'fallback', status: 'done', result: { source_id: 'video', recommended_format_ids: ['720'] } } };
+  f.preparation.observe(); await settle(f.preparation);
+  assert.equal(f.calls.filter(([name]) => name === 'download').length, 1);
+});
+
+test('fresh unknown iframe documents are independent candidates, but known hidden and stale sources stay excluded', async () => {
+  const f = fixture();
+  f.context = { url: 'https://page.test/', documentToken: 'doc', documents: ['visible'], hiddenDocuments: ['hidden'], tabGeneration: 'current' };
+  f.items = [{ ...stream('https://cdn.test/unbound', 'unmapped-worker'), tabGeneration: 'current' },
+    { ...stream('https://cdn.test/hidden', 'hidden'), tabGeneration: 'current' },
+    { ...stream('https://cdn.test/old'), tabGeneration: 'old' }];
+  await f.begin(false); await settle(f.preparation);
+  await new Promise(resolve => setTimeout(resolve, 380)); await settle(f.preparation);
+  assert.deepEqual(f.calls.find(([name]) => name === 'inspect')[1].fallbacks.map(item => item.urls[0]), ['https://cdn.test/unbound']);
+  f.preparation.cancel();
+});
+
+test('a rejected existing source is not reported as an absent video', async () => {
+  const f = fixture();
+  f.context = { url: 'https://page.test/', documentToken: 'doc', documents: ['visible'], hiddenDocuments: ['hidden'], tabGeneration: 'current' };
+  f.items = [{ ...stream('https://cdn.test/hidden', 'hidden'), tabGeneration: 'current' }];
+  await f.begin(true); await settle(f.preparation);
+  assert.equal(f.preparation.current.phase, 'blocked');
+  assert.equal(f.preparation.current.download, false);
+  assert.match(f.preparation.current.error, /Видео обнаружено/);
+  assert.equal(f.calls.length, 0);
+  f.preparation.cancel();
+});

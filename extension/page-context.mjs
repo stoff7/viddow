@@ -1,4 +1,4 @@
-import { visibleDocuments, visibleMedia } from './media-model.mjs';
+import { visibleDocuments, hiddenDocuments, visibleMedia } from './media-model.mjs';
 
 async function collectContext(tabId) {
   const target = { tabId, allFrames: true };
@@ -18,7 +18,8 @@ async function collectContext(tabId) {
   const media = visibleMedia(tabId, frames, latest);
   return { media: media.map(({ key, src, documentId, frameId }) => ({ key, src, documentId, frameId })),
     mediaKeys: media.filter(media => media.src).map(media => media.key), url: top.result.url,
-    documentToken: top.result.documentToken, documents: documents.map(frame => frame.documentId) };
+    documentToken: top.result.documentToken, documents: documents.map(frame => frame.documentId),
+    allDocuments: latest.map(frame => frame.documentId).filter(Boolean), hiddenDocuments: hiddenDocuments(latest).map(frame => frame.documentId) };
 }
 
 export async function pageContext(tabId, { timeoutMs = 3000 } = {}) {

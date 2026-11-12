@@ -53,6 +53,7 @@ const { extensionPath, openPanel } = require('./extension_browser.cjs');
         if (globalThis.__nativeMode === 'throw') throw new Error('Native host not found');
         const port = { onMessage: event(), onDisconnect: event(), disconnect() { this.onDisconnect.fire(); },
           postMessage(message) {
+            if (message.type === 'trace') return;
             globalThis.__nativeCalls.push(message);
             setTimeout(() => {
               if (message.type === 'session') {
@@ -281,9 +282,20 @@ const { extensionPath, openPanel } = require('./extension_browser.cjs');
     await panel.waitForFunction(() => document.querySelector('#message').textContent === 'Настройки сохранены');
     assert.equal((await worker.evaluate(() => chrome.storage.local.get('settings'))).settings.youtube_browser, 'vivaldi');
     await panel.locator('[data-view=jobs]').click();
+    const beforeYoutubeRefresh = await worker.evaluate(() => globalThis.__nativeCalls.length);
     await panel.locator('.job.error').getByRole('button', { name: 'Обновить ссылку', exact: true }).click();
-    await panel.waitForFunction(async () => { const value = await chrome.storage.session.get('nativeState'); return value.nativeState?.analysis?.url === 'https://www.youtube.com/watch?v=public_test'; });
-    const freshYoutube = await worker.evaluate(() => globalThis.__nativeCalls.at(-1));
+    const freshYoutube = await worker.evaluate(async previous => {
+      // waitForFunction treats an async predicate's Promise as truthy in this
+      // Playwright build. Poll the actual new native request in its own context.
+      const deadline = Date.now() + 5000;
+      while (Date.now() < deadline) {
+        const message = globalThis.__nativeCalls.slice(previous).find(message => message.command === 'inspect'
+          && message.urls?.[0] === 'https://www.youtube.com/watch?v=public_test');
+        if (message) return message;
+        await new Promise(resolve => setTimeout(resolve, 25));
+      }
+      throw new Error('History refresh did not issue a new inspect command');
+    }, beforeYoutubeRefresh);
     assert.equal(freshYoutube.command, 'inspect'); assert.equal(freshYoutube.source_kind, 'page');
     assert.equal(freshYoutube.urls[0], 'https://www.youtube.com/watch?v=public_test');
     // Основной UX: подготовка не скачивает; выбранный источник переживает вкладку и очередь.

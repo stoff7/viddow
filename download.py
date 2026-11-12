@@ -12,6 +12,8 @@
 По умолчанию файлы кладутся в ~/Downloads. Те же функции использует server.py,
 чтобы качать со страницы video-links.html: прогресс отдаётся через колбэк progress.
 """
+from trace_log import trace_event
+
 import argparse
 import glob
 import itertools
@@ -191,6 +193,9 @@ def stop_process(process):
 def run_tool(command, on_line, cancel=None, max_line_chars=None, on_idle=None):
     """Запускает ffmpeg/yt-dlp: stdout построчно в on_line, при ошибке — последняя строка stderr."""
     check_cancel(cancel)
+    started = time.monotonic()
+    tool = os.path.basename(command[0])
+    trace_event("process_start", tool=tool)
     with tempfile.TemporaryFile("w+") as errors:
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=errors, text=True,
                                    start_new_session=os.name == "posix")
@@ -227,6 +232,8 @@ def run_tool(command, on_line, cancel=None, max_line_chars=None, on_idle=None):
             if process.poll() is None:
                 stop_process(process)
             process.stdout.close()
+            trace_event("process_done" if process.returncode == 0 else "process_error", tool=tool, elapsed_ms=int((time.monotonic() - started) * 1000))
+
         check_cancel(cancel)
         if watcher_errors:
             raise watcher_errors[0]

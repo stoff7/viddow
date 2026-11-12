@@ -16,6 +16,7 @@ from contracts import format_ids_from, valid_url
 from source_auth import is_youtube, ytdlp_auth_args
 from diagnostics import describe_error
 from media_prepare import recommended, preview_gif
+from trace_log import trace_event
 
 TIMEOUT = 30
 MAX_JSON = 8 * 1024 * 1024
@@ -166,12 +167,20 @@ class Inspector:
             self._fallback_only = fallback_only
             self._options = copy.deepcopy(options)
             self._state = {"id": uuid.uuid4().hex, "url": url, "page": options.get("page") or url, "status": "running", "result": None, "error": None}
+            trace_event("analysis_start", analysis_tag=self._state["id"], candidates_count=len(self._fallbacks), status="running")
             self._thread = threading.Thread(target=self._run, args=(url,), name="inspect", daemon=True)
             self._thread.start()
             return {"analysis_id": self._state["id"]}
 
     def _analyze(self, url, options):
-        result = self.inspect(url, {**options, '_preview_context': True}, self._cancel)
+        started = time.monotonic()
+        trace_event('candidate_start', analysis_tag=self._state['id'], source_tag=options.get('_trace_tag'))
+        try:
+            result = self.inspect(url, {**options, '_preview_context': True}, self._cancel)
+        except Exception as error:
+            trace_event('candidate_error', analysis_tag=self._state['id'], source_tag=options.get('_trace_tag'), code=describe_error(error)[0], elapsed_ms=int((time.monotonic() - started) * 1000))
+            raise
+        trace_event('candidate_done', analysis_tag=self._state['id'], source_tag=options.get('_trace_tag'), formats_count=len(result.get('formats', [])), elapsed_ms=int((time.monotonic() - started) * 1000))
         context = result.pop('_preview', None)
         if options.get('stream_kind') and options.get('name'):
             result['title'] = options['name'][:512]
@@ -222,10 +231,12 @@ class Inspector:
                 download.check_cancel(self._cancel)
                 self._sources = private
                 self._state.update(status='done', result=result, url=sources[0]['url'])
+                trace_event('analysis_done', analysis_tag=self._state['id'], source_tag=selected['id'], candidate_tag=sources[0]['options'].get('_trace_tag'), candidates_count=len(public), status='done')
         except Exception as error:
             with self._lock:
                 cancelled = self._cancel.is_set() or isinstance(error, download.Cancelled)
                 code, message = describe_error(error)
+                trace_event('analysis_cancelled' if cancelled else 'candidate_error', analysis_tag=self._state['id'], code=code, status='cancelled' if cancelled else 'error')
                 self._state.update(status='cancelled' if cancelled else 'error', error=None if cancelled else message,
                                    error_code=None if cancelled else code, error_detail=None if cancelled else str(error)[:16384])
 
@@ -237,8 +248,11 @@ class Inspector:
         with source['preview_lock']:
             download.check_cancel(cancel)
             if not source['preview_done']:
+                started = time.monotonic()
+                trace_event('preview_start', analysis_tag=identifier, source_tag=source_id)
                 source['preview'] = preview_gif(source['preview_context'], cancel)
                 source['preview_done'] = True
+                trace_event('preview_done' if source['preview'] else 'preview_error', analysis_tag=identifier, source_tag=source_id, bytes_count=len(source['preview'] or ''), elapsed_ms=int((time.monotonic() - started) * 1000))
             download.check_cancel(cancel)
             return {'analysis_id': identifier, 'source_id': source_id, 'image': source['preview']}
 
@@ -294,6 +308,7 @@ class Inspector:
             options.update(format_ids=ids, format_label=" · ".join([quality, *audio]),
                            name=options.get("name") or source["result"]["title"])
             options.pop("_timeout", None)
+            options.pop("_trace_tag", None)
             return [source["url"]], options
 
     def close(self):

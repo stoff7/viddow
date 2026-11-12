@@ -33,6 +33,9 @@
     const data = event.data;
     if (data?.type === 'viddow_identity_probe' && event.source === window.parent && event.source !== window) {
       event.source.postMessage({ type: 'viddow_identity_reply', nonce: data.nonce, documentToken }, '*');
+    } else if (data?.type === 'viddow_identity_announce' && event.source !== window) {
+      const child = [...document.querySelectorAll('iframe, frame')].find(node => node.contentWindow === event.source);
+      if (child && typeof data.documentToken === 'string') childTokens.set(child, data.documentToken);
     } else if (data?.type === 'viddow_identity_reply') {
       const probe = pending.get(data.nonce);
       if (probe && probe.child === event.source) probe.resolve(data.documentToken);
@@ -52,6 +55,12 @@
     finally { canvas.width = 0; canvas.height = 0; }
   }
   async function read(probeChildren = true, imageRequests = {}) {
+    // A child can identify its container even when that container is hidden and
+    // the parent deliberately avoids waiting for its probe. Tokens are checked
+    // against scripting results before either visibility or identity is used.
+    if (window.parent && window.parent !== window) {
+      try { window.parent.postMessage({ type: 'viddow_identity_announce', documentToken }, '*'); } catch {}
+    }
     const childNodes = [...document.querySelectorAll('iframe, frame')];
     const children = probeChildren ? await Promise.all(childNodes.map(async node => {
       if (!visible(node)) return { documentToken: null, visible: false };
