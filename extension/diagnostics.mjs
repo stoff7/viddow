@@ -1,6 +1,6 @@
 export const DIAGNOSTIC_LIMIT = 200;
 const EVENTS = new Set(['panel_start', 'panel_ready', 'panel_error', 'panel_stalled', 'host_connect_start',
-  'host_ready', 'host_disconnect', 'host_connect_failed', 'host_timeout', 'command_start', 'command_ok', 'command_error', 'analysis_state']);
+  'host_ready', 'host_disconnect', 'host_connect_failed', 'host_timeout', 'command_start', 'command_ok', 'command_error', 'analysis_state', 'page_context_start', 'page_context_ready', 'page_context_unavailable']);
 const COMMANDS = new Set(['inspect', 'preview', 'inspect_cancel', 'inspect_history', 'download', 'cancel', 'retry', 'clear', 'configure', 'reveal']);
 const NAMES = new Set(['Error', 'TypeError', 'ReferenceError', 'SyntaxError', 'RangeError', 'DOMException']);
 const FILES = new Set(['popup.js', 'startup.js', 'background.js', 'format-model.mjs', 'history-model.mjs', 'stream-model.mjs', 'diagnostics.mjs']);

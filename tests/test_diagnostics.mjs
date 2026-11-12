@@ -10,6 +10,7 @@ test('diagnostics only retain approved event codes and numeric/source fields', (
   assert.equal(diagnosticEntry('https://private.test/?token=secret'), null);
   assert.deepEqual(diagnosticEntry('command_error', { command: 'private-command', code: 'Cookie: secret', elapsed_ms: -1 }, 123), { time: 123, event: 'command_error' });
   assert.doesNotThrow(() => diagnosticEntry('panel_error', null));
+  assert.deepEqual(diagnosticEntry('page_context_unavailable', { elapsed_ms: 3000, url: 'https://private.test/' }, 123), { time: 123, event: 'page_context_unavailable', elapsed_ms: 3000 });
   assert.equal(diagnosticCode('Native host not found'), 'host_not_found');
   assert.equal(diagnosticCode('Помощник не ответил'), 'timeout');
 });

@@ -3,6 +3,7 @@
   if (globalThis.__viddowReadPreview) return globalThis.__viddowReadPreview(false);
   const documentToken = crypto.randomUUID();
   const identities = new WeakMap();
+  const childTokens = new WeakMap();
   let sequence = 0;
   function visible(node) {
     if (!node.getClientRects().length) return false;
@@ -51,16 +52,19 @@
     finally { canvas.width = 0; canvas.height = 0; }
   }
   async function read(probeChildren = true, imageRequests = {}) {
-    const children = probeChildren ? await Promise.all([...document.querySelectorAll('iframe, frame')].map(async node => {
+    const childNodes = [...document.querySelectorAll('iframe, frame')];
+    const children = probeChildren ? await Promise.all(childNodes.map(async node => {
+      if (!visible(node)) return { documentToken: null, visible: false };
       const nonce = crypto.randomUUID(), child = node.contentWindow;
       const token = await new Promise(resolve => {
-        const timer = setTimeout(() => { pending.delete(nonce); resolve(null); }, 120);
+        const timer = setTimeout(() => { pending.delete(nonce); resolve(null); }, 250);
         pending.set(nonce, { child, resolve: token => { clearTimeout(timer); pending.delete(nonce); resolve(token); } });
         try { child?.postMessage({ type: 'viddow_identity_probe', nonce }, '*'); }
         catch { clearTimeout(timer); pending.delete(nonce); resolve(null); }
       });
-      return { documentToken: token, visible: visible(node) };
-    })) : [];
+      if (token) childTokens.set(node, token);
+      return { documentToken: token || childTokens.get(node) || null, visible: visible(node) };
+    })) : childNodes.map(node => ({ documentToken: childTokens.get(node) || null, visible: visible(node) }));
     const media = [...document.querySelectorAll('video')].map(video => {
       const { id, generation, src } = identity(video);
       return { id, generation, src, visible: visible(video), poster: httpUrl(video.poster), posterSource: 'player',

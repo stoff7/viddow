@@ -252,7 +252,12 @@ async function handle(message) {
       page: message.page || '', referer: item.referer || '', headers: item.headers || {},
       source_kind: item.source_kind || 'auto', stream_kind: item.kind || null };
     if (message.type !== 'inspect') return command(request);
-    let context = item.source_kind === 'page' && Number.isInteger(message.tabId) ? await pageContext(message.tabId) : null;
+    let context = null;
+    if (item.source_kind === 'page' && Number.isInteger(message.tabId)) {
+      const started = Date.now(); recordDiagnostic('page_context_start');
+      context = await pageContext(message.tabId);
+      recordDiagnostic(context ? 'page_context_ready' : 'page_context_unavailable', { elapsed_ms: Date.now() - started });
+    }
     if (context && context.url !== item.url) { if (message.automatic) return { skipped: true }; context = null; }
     if (message.downloadAfterPrepare && context && await preparation.requestDownload({ tabId: message.tabId,
       page: item.url, session: message.session, selectedMediaKey: message.selectedMediaKey || null, documentToken: context.documentToken })) return { pending_download: true };

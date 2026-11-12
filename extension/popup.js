@@ -71,7 +71,7 @@ function controls() {
   const analysing = inspectPending || ['running', 'cancelling'].includes(state.analysis?.status);
   $('inspectPage').disabled = !online || inspectPending || !validUrl(tab?.url) || Boolean(currentPreparation()?.downloadPending);
   $('inspectLink').disabled = !online || analysing;
-  const reason = !online ? 'Подключите локальный помощник, чтобы продолжить.' : analysing ? 'Идёт подготовка. Дождитесь результата или отмените её.' : '';
+  const reason = !online ? 'Подключите локальный помощник, чтобы продолжить.' : inspectPending ? 'Проверяем страницу и плееры…' : analysing ? 'Идёт подготовка. Дождитесь результата или отмените её.' : '';
   $('prepareHint').textContent = reason || (validUrl(tab?.url) ? 'Когда появится видео, подготовим качество и звук автоматически.' : 'Откройте страницу с видео в этой вкладке.');
   $('linkHint').textContent = reason;
   $('cancelAnalysis').disabled = !online || !(state.analysis?.status === 'running' || recovering());

@@ -106,8 +106,26 @@ async function waitFor(fn, title, timeout = 45000) {
     await source.evaluate(() => window.discover());
     await waitFor(async () => (await state()).jobs.length === 3 && (await state()).jobs[2].status === 'done', 'Pending one-click download failed: ' + JSON.stringify(await state()));
     assert.match((await state()).jobs[2].url, /\/high\/master.m3u8/);
+    // Regression: the DOM bridge can fail to answer before native inspection starts.
+    // The worker deadline must still release the panel and let the page analysis end.
+    await source.goto(base + '/early?stalled-context=1');
+    await worker.evaluate(() => {
+      const original = chrome.scripting.executeScript.bind(chrome.scripting);
+      let stalled = false;
+      chrome.scripting.executeScript = options => {
+        if (!stalled && options.files?.includes('page-preview.js')) { stalled = true; return new Promise(() => {}); }
+        return original(options);
+      };
+    });
+    await panel.locator('#closeAnalysis').click();
+    const beforeStalled = (await state()).analysis.id;
+    await panel.locator('#inspectPage').click();
+    await waitFor(async () => { const analysis = (await state()).analysis; return analysis.id !== beforeStalled && analysis.status === 'error'; }, 'DOM bridge left preparation stuck', 10000);
+    await panel.waitForFunction(() => !document.querySelector('#inspectLink').disabled);
+    const log = await worker.evaluate(async () => (await chrome.storage.session.get('diagnosticLog')).diagnosticLog);
+    assert.ok(log.some(row => row.event === 'page_context_unavailable' && row.elapsed_ms >= 2800), 'context timeout must be visible without URLs in diagnostics');
     assert.deepEqual(errors, []);
-    console.log('PASS real automatic fallback: two candidates, 720p+sound recommendation, GIF, two panels, exact-source download, alternative choice, early one-click intent');
+    console.log('PASS real automatic fallback: two candidates, 720p+sound recommendation, GIF, two panels, exact-source download, alternative choice, early one-click intent, stalled DOM bridge deadline');
     console.log('Artifacts: ' + artifacts);
   } finally {
     await context?.close(); if (server) await new Promise(resolve => server.close(resolve)); fs.rmSync(temp, { recursive: true, force: true });
