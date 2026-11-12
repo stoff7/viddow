@@ -1,0 +1,11 @@
+<!doctype html><meta charset="utf-8"><title>Feed: thirty independent videos</title>
+<style>video { width:160px; height:90px; display:block }</style>
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+  for (let i = 0; i < 30; i++) {
+    const video = document.createElement('video');
+    video.preload = 'metadata'; video.src = `/episode-${i % 2 + 1}.mp4?post=${i}`;
+    document.body.append(video);
+  }
+});
+</script>

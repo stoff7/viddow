@@ -1,0 +1,15 @@
+<!doctype html><meta charset="utf-8"><title>Player</title>
+<style>video { width: 160px; height: 90px }</style>
+<video id="episode" poster="/episode-1.svg" preload="metadata" src="/episode-1.mp4?token=complete"></video>
+<script>
+// Tiny local MP4 files supply real browser metadata without playback.
+window.changeEpisode = () => {
+  const video = document.querySelector('video');
+  video.src = '/episode-2.mp4?token=complete'; video.poster = '/episode-2.svg';
+  video.dispatchEvent(new Event('emptied', { bubbles: true }));
+};
+window.addSecond = () => {
+  const video = document.createElement('video'); video.poster = '/second.svg';
+  document.body.append(video);
+};
+</script>

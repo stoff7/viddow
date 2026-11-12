@@ -7,6 +7,7 @@ const STREAM_TYPE = /mpegurl|dash\+xml/i;
 const STREAM_PATH = /\.(m3u8|mpd)$/i;
 const SKIP_HEADER = /^(range|accept-encoding|host|connection|content-length|if-.*)$/i;
 const sentHeaders = new Map();
+const tabGenerations = new Map(), requestGenerations = new Map();
 const key = (tabId) => `tab_${tabId}`;
 let chain = Promise.resolve();
 function update(storageKey, change, afterWrite) {
@@ -30,25 +31,35 @@ chrome.webRequest.onSendHeaders.addListener((details) => {
     .filter((header) => header.value !== undefined && !SKIP_HEADER.test(header.name))
     .map((header) => [header.name, header.value])));
 }, { urls: ['<all_urls>'], types: ['xmlhttprequest', 'media', 'other'] }, ['requestHeaders', 'extraHeaders']);
-chrome.webRequest.onErrorOccurred.addListener((details) => sentHeaders.delete(details.requestId), { urls: ['<all_urls>'] });
+chrome.webRequest.onErrorOccurred.addListener((details) => { sentHeaders.delete(details.requestId); requestGenerations.delete(details.requestId); }, { urls: ['<all_urls>'] });
 chrome.webRequest.onBeforeRedirect.addListener((details) => sentHeaders.delete(details.requestId), { urls: ['<all_urls>'] });
 chrome.webRequest.onHeadersReceived.addListener((details) => {
   const headers = sentHeaders.get(details.requestId);
   sentHeaders.delete(details.requestId);
-  if (details.tabId < 0) return;
+  const generation = requestGenerations.get(details.requestId);
+  requestGenerations.delete(details.requestId);
+  if (details.tabId < 0 || !generation || generation !== tabGenerations.get(details.tabId)) return;
   const contentType = details.responseHeaders?.find((header) => header.name.toLowerCase() === 'content-type')?.value || '';
   const path = new URL(details.url).pathname;
   if (details.statusCode >= 400 || (!STREAM_TYPE.test(contentType) && !STREAM_PATH.test(path))) return;
   const item = { url: details.url, kind: /dash|\.mpd$/i.test(contentType + path) ? 'DASH' : 'HLS',
     referer: details.initiator && /^https?:/.test(details.initiator) ? details.initiator + '/' : '',
-    headers, lastSeen: details.timeStamp || Date.now() };
-  updateTab(details.tabId, (items) => rememberStream(items, item));
+    tabGeneration: generation, frameId: details.frameId, documentId: details.documentId,
+    parentFrameId: details.parentFrameId, headers, lastSeen: details.timeStamp || Date.now() };
+  updateTab(details.tabId, (items) => generation === tabGenerations.get(details.tabId) ? rememberStream(items, item) : items);
 }, { urls: ['<all_urls>'], types: ['xmlhttprequest', 'media', 'other'] }, ['responseHeaders']);
 // Чистим до запросов нового документа, чтобы поздний ответ навигации не удалял новые потоки.
 chrome.webRequest.onBeforeRequest.addListener((details) => {
-  if (details.tabId >= 0) updateTab(details.tabId, () => []);
-}, { urls: ['<all_urls>'], types: ['main_frame'] });
+  if (details.tabId < 0) return;
+  if (details.type === 'main_frame' || !tabGenerations.has(details.tabId)) {
+    tabGenerations.set(details.tabId, crypto.randomUUID());
+    updateTab(details.tabId, () => []);
+  }
+  requestGenerations.set(details.requestId, tabGenerations.get(details.tabId));
+}, { urls: ['<all_urls>'], types: ['main_frame', 'xmlhttprequest', 'media', 'other'] });
+chrome.webRequest.onCompleted.addListener(details => requestGenerations.delete(details.requestId), { urls: ['<all_urls>'] });
 chrome.tabs.onRemoved.addListener((tabId) => {
+  tabGenerations.delete(tabId);
   chain = chain.then(() => chrome.storage.session.remove(key(tabId))).catch(console.error);
 });
 

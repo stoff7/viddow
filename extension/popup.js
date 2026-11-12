@@ -1,4 +1,5 @@
 import { groupStreams } from './stream-model.mjs';
+import { visibleMedia, selectMedia } from './media-model.mjs';
 import { formatLabel, mainFormats, choiceProblem, durationLabel, qualityLabel, audioLabel, defaultChoice } from './format-model.mjs';
 import { decodeHistory, offlineJobs } from './history-model.mjs';
 
@@ -11,7 +12,8 @@ let tab = null, tabKey = '', items = [], state = { jobs: [], settings: {} }, onl
 let filter = 'all', settingsDirty = false, refreshRevision = 0, hostRevision = 0;
 let analysisKey = '', dismissedAnalysis = '', inspectPending = false, selectionPending = false;
 let currentDownload = null;
-let previewRevision = 0;
+let currentCandidates = [], imageWindowKeys = [], imageScrollTimer;
+let previewRevision = 0, selectedMedia = null, previewDocument = null;
 let pagePreview = null, previewKey = '', autoTimer = null, autoScheduledKey = '';
 const automaticSources = new Set();
 const choices = new Map(), cards = new Map();
@@ -88,44 +90,131 @@ async function refreshTab() {
   refreshPreview();
 }
 function clearPreview() {
+  currentCandidates = [];
+  for (const img of $('playerImages').querySelectorAll('img')) { img.removeAttribute('src'); img.hidden = true; img.nextElementSibling.hidden = false; }
   $('pageThumbnail').hidden = true;
   $('pageThumbnail').removeAttribute('src');
+  $('pageImageMissing').hidden = true;
   $('pageFacts').hidden = true;
   $('pageFacts').textContent = '';
+  renderStreamImages();
 }
 async function refreshPreview() {
   const revision = ++previewRevision, current = tab;
   const key = `${current?.id}:${current?.url}`;
-  if (key !== previewKey) { previewKey = key; pagePreview = null; clearPreview(); }
+  if (key !== previewKey) { imageWindowKeys = []; $('playerImages').replaceChildren(); $('playerChoice').hidden = true; previewKey = key; pagePreview = null; selectedMedia = null; previewDocument = null; clearPreview(); }
   if (!validUrl(current?.url) || $('currentPage').hidden) return;
   try {
-    const frames = await chrome.scripting.executeScript({ target: { tabId: current.id, allFrames: true }, files: ['page-preview.js'] });
+    const target = { tabId: current.id, allFrames: true };
+    await chrome.scripting.executeScript({ target, files: ['page-preview.js'] });
+    const frames = await chrome.scripting.executeScript({ target, func: () => globalThis.__viddowReadPreview?.() });
+    const initial = visibleMedia(current.id, frames);
+    const initialChoice = selectMedia(initial, selectedMedia);
+    // Bound transient images across the tab, and always include the selected video.
+    const imageRequests = {};
+    const inView = initial.filter(media => imageWindowKeys.includes(media.key));
+    const imageWindow = [...new Map([...inView, ...initial].map(media => [media.key, media])).values()].slice(0, 24);
+    for (const media of [...(initialChoice ? [initialChoice] : []), ...imageWindow]) {
+      (imageRequests[media.documentToken] ||= []).push(media.id);
+    }
+    const latest = await chrome.scripting.executeScript({ target, func: requests => globalThis.__viddowReadPreview?.(true, requests), args: [imageRequests] });
     if (revision !== previewRevision || current.id !== tab?.id || current.url !== tab?.url) return;
     const page = frames.find(frame => frame.frameId === 0)?.result;
-    if (page?.url !== current.url) return;
-    pagePreview = { ...page, hasPlayer: frames.some(frame => frame.result?.hasPlayer) };
-    const players = frames.filter(frame => frame.result?.hasPlayer);
-    // Several players may be unrelated videos/ads. Do not combine their data.
-    const preview = players.length === 1 ? players[0].result : { ...page, duration: null, isLive: false };
-    if (!players.length) Object.assign(preview, page);
-    if (!preview.poster) { $('pageThumbnail').hidden = true; $('pageThumbnail').removeAttribute('src'); }
-    if (preview.poster) {
-      $('pageThumbnail').src = preview.poster;
-      $('pageThumbnail').alt = preview.posterSource === 'player' ? 'Превью из плеера' : 'Изображение со страницы';
-      $('pageThumbnail').hidden = false;
+    if (page?.url !== current.url || !latest.some(frame => frame.frameId === 0 && frame.result?.documentToken === page.documentToken)) return;
+    if (previewDocument && previewDocument !== page.documentToken) selectedMedia = null;
+    previewDocument = page.documentToken;
+    const candidates = visibleMedia(current.id, frames, latest);
+    currentCandidates = candidates;
+    const chosen = selectMedia(candidates, selectedMedia);
+    if (chosen && selectedMedia?.url) selectedMedia = { key: chosen.key };
+    pagePreview = { ...page, hasPlayer: candidates.length > 0 };
+    const picker = $('playerChoice');
+    const options = [{ key: '', label: selectedMedia && !chosen ? 'Выбранный источник недоступен' : 'Выберите плеер' },
+      ...candidates.map((media, index) => ({ key: media.key, label: `Плеер ${index + 1}${media.duration ? ` · ${durationLabel(media)}` : ''}` }))];
+    const signature = JSON.stringify(options);
+    if (picker.dataset.options !== signature) {
+      picker.replaceChildren(...options.map(item => Object.assign(el('option', '', item.label), { value: item.key })));
+      picker.dataset.options = signature;
     }
+    picker.hidden = candidates.length < 2 && !selectedMedia;
+    picker.value = chosen?.key || '';
+    picker.onchange = () => { selectedMedia = { key: picker.value || '__unavailable__' }; clearPreview(); refreshPreview(); };
+    // Page artwork stays page artwork, and never fills a missing player poster.
+    const hasAnyMedia = frames.some(frame => frame.result?.media?.length);
+    const preview = chosen || { poster: !hasAnyMedia && !selectedMedia ? page.pageImage : '', posterSource: 'page', duration: !hasAnyMedia && !selectedMedia ? page.pageDuration : null, durationSource: 'page' };
+    const image = preview.frameImage || preview.poster;
+    $('pageImageMissing').hidden = Boolean(image) || !chosen;
+    $('pageThumbnail').hidden = !image;
+    if (!image) $('pageThumbnail').removeAttribute('src');
+    else {
+      $('pageThumbnail').src = image;
+      $('pageThumbnail').alt = preview.frameImage ? 'Кадр выбранного видео' : preview.posterSource === 'player' ? 'Постер выбранного видео' : 'Изображение со страницы';
+    }
+    renderPlayerImages(candidates, chosen);
+    renderStreamImages();
     const facts = [];
+    if (preview.frameImage) facts.push('Кадр выбранного видео');
     if (preview.isLive) facts.push('Прямой эфир по данным плеера');
     else if (preview.duration != null) facts.push(`${durationLabel({ duration: preview.duration })} · ${preview.durationSource === 'player' ? 'По данным плеера' : 'По данным страницы'}`);
     if (preview.poster && preview.posterSource === 'page') facts.push('Изображение со страницы');
     $('pageFacts').textContent = facts.join(' · ');
     $('pageFacts').hidden = !facts.length;
     maybeAutoInspect();
-  } catch { /* Restricted/closed tabs can still use preparation and manual links. */ }
+  } catch { /* Restricted/closed documents keep explicit source selection and manual links usable. */ }
 }
-$('pageThumbnail').onerror = () => { $('pageThumbnail').hidden = true; };
+$('pageThumbnail').onerror = () => { $('pageThumbnail').hidden = true; $('pageImageMissing').hidden = false; };
+function renderStreamImages() {
+  for (const card of $('streams').children) {
+    const [url, frameId, documentId] = JSON.parse(card.dataset.sourceKey);
+    const media = selectMedia(currentCandidates, { url, frameId, documentId });
+    const image = media?.frameImage || media?.poster;
+    const img = card.querySelector('.stream-thumbnail');
+    img.hidden = !image; img.nextElementSibling.hidden = Boolean(image);
+    if (image) { if (img.getAttribute('src') !== image) img.src = image; }
+    else img.removeAttribute('src');
+  }
+}
+function renderPlayerImages(candidates, chosen) {
+  const container = $('playerImages');
+  container.hidden = candidates.length < 2;
+  const existing = new Map([...container.children].map(node => [node.dataset.key, node]));
+  const activeKeys = new Set();
+  candidates.forEach((media, index) => {
+    activeKeys.add(media.key);
+    let button = existing.get(media.key);
+    if (!button) {
+      button = el('button', 'player-option'); button.type = 'button'; button.dataset.key = media.key;
+      const img = el('img'); img.referrerPolicy = 'no-referrer'; img.alt = '';
+      const missing = el('span', 'player-image-missing', 'Кадр недоступен');
+      img.onerror = () => { img.hidden = true; missing.hidden = false; };
+      button.append(img, missing, el('span'));
+      button.onclick = () => { selectedMedia = { key: media.key }; clearPreview(); refreshPreview(); };
+      container.append(button);
+    }
+    const [img, missing, label] = button.children;
+    const image = media.frameImage || media.poster;
+    if (image) { if (img.getAttribute('src') !== image) img.src = image; }
+    else img.removeAttribute('src');
+    img.hidden = !image; missing.hidden = Boolean(image);
+    label.textContent = `Плеер ${index + 1}${media.duration ? ` · ${durationLabel(media)}` : ''}`;
+    button.setAttribute('aria-pressed', String(media.key === chosen?.key));
+  });
+  for (const [key, node] of existing) if (!activeKeys.has(key)) node.remove();
+  if (chosen && container.dataset.selected !== chosen.key && !container.hidden) {
+    const button = [...container.children].find(node => node.dataset.key === chosen.key);
+    if (button) container.scrollTop += button.getBoundingClientRect().top - container.getBoundingClientRect().top;
+  }
+  container.dataset.selected = chosen?.key || '';
+}
+$('playerImages').onscroll = () => {
+  const container = $('playerImages'), bounds = container.getBoundingClientRect();
+  const keys = [...container.children].filter(node => { const rect = node.getBoundingClientRect(); return rect.bottom > bounds.top && rect.top < bounds.bottom; }).map(node => node.dataset.key);
+  if (JSON.stringify(keys) === JSON.stringify(imageWindowKeys)) return;
+  imageWindowKeys = keys; clearTimeout(imageScrollTimer);
+  imageScrollTimer = setTimeout(() => refreshPreview(), 120);
+};
 chrome.runtime.onMessage.addListener((message, sender) => {
-  if (message.type === 'page_preview_changed' && sender.tab?.id === tab?.id && !$('currentPage').hidden) refreshPreview();
+  if (message.type === 'page_preview_changed' && sender.tab?.id === tab?.id && !$('currentPage').hidden) { clearPreview(); refreshPreview(); }
 });
 function automaticSource() {
   if (!online || !state.session || !validUrl(tab?.url) || $('currentPage').hidden || inspectPending || selectionPending
@@ -166,6 +255,7 @@ async function start(item, title = '', page = '') {
   added(await send({ type: 'download', item, title, page }));
 }
 async function inspect(item, title = '', page = '', automatic = false) {
+  if (!automatic && item.kind) { selectedMedia = { url: item.url, frameId: item.frameId, documentId: item.documentId }; clearPreview(); refreshPreview(); }
   inspectPending = true; controls(); notice('');
   try {
     const result = await send({ type: 'inspect', item, title, page, automatic, tabId: tab?.id,
@@ -338,10 +428,15 @@ function renderStreams() {
     details.append(fullUrl, copyButton);
     details.insertBefore(path, details.children[1]);
     details.insertBefore(el('div', 'stream-observed', [group.kind, observed(item) ? `Замечен в ${observed(item)}` : ''].filter(Boolean).join(' · ')), path);
-    li.append(heading, el('div', 'stream-host', group.host), el('div', 'stream-path', decoded(group.path)), el('p', 'field-note', 'Качество и звук пока неизвестны'), analyse, actions, refresh, details);
+    const image = el('img', 'stream-thumbnail'); image.alt = 'Изображение выбранного потока'; image.referrerPolicy = 'no-referrer';
+    const missingImage = el('p', 'field-note', 'Картинка потока пока не подтверждена');
+    image.onerror = () => { image.hidden = true; missingImage.hidden = false; };
+    li.dataset.sourceKey = JSON.stringify([item.url, item.frameId, item.documentId]);
+    li.append(image, missingImage, heading, el('div', 'stream-host', group.host), el('div', 'stream-path', decoded(group.path)), el('p', 'field-note', 'Качество и звук пока неизвестны'), analyse, actions, refresh, details);
     return li;
   }));
   if (focusedUrl) [...$('streams').querySelectorAll('button[data-url]')].find((button) => button.dataset.url === focusedUrl && button.dataset.action === focusedAction)?.focus({ preventScroll: true });
+  renderStreamImages();
   maybeAutoInspect();
 }
 function makeJob(job) {

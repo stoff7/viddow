@@ -1,45 +1,93 @@
-// Runs in Chrome's isolated world, only in the tab requested by the open panel.
-// Read local DOM metadata; never fetch manifests or start the native inspector.
+// Isolated world. No fetch, play or seek. Token identity lasts for this document.
 (() => {
+  if (globalThis.__viddowReadPreview) return globalThis.__viddowReadPreview(false);
+  const documentToken = crypto.randomUUID();
+  const identities = new WeakMap();
+  let sequence = 0;
+  function visible(node) {
+    if (!node.getClientRects().length) return false;
+    for (let parent = node; parent; parent = parent.parentElement) {
+      const style = getComputedStyle(parent);
+      if (parent.hidden || style.contentVisibility === 'hidden' || style.display === 'none' || ['hidden', 'collapse'].includes(style.visibility) || Number(style.opacity) === 0) return false;
+    }
+    return true;
+  }
   function httpUrl(value) {
     if (!value) return '';
+    try { const url = new URL(value, document.baseURI); return /^https?:$/.test(url.protocol) ? url.href : ''; }
+    catch { return ''; }
+  }
+  function identity(video) {
+    const src = video.currentSrc || video.src || '';
+    const signature = JSON.stringify([video.currentSrc || '', video.src || '', ...[...(video.querySelectorAll?.('source') || [])].map(node => node.src)]);
+    let value = identities.get(video);
+    if (!value) { value = { id: ++sequence, generation: 0, src, signature }; identities.set(video, value); }
+    if (value.signature !== signature) { value.signature = signature; value.generation++; }
+    value.src = src;
+    return value;
+  }
+  const meta = name => document.querySelector(`meta[property="${name}"], meta[name="${name}"]`)?.content || '';
+  const pending = new Map();
+  window.addEventListener('message', event => {
+    const data = event.data;
+    if (data?.type === 'viddow_identity_probe' && event.source === window.parent && event.source !== window) {
+      event.source.postMessage({ type: 'viddow_identity_reply', nonce: data.nonce, documentToken }, '*');
+    } else if (data?.type === 'viddow_identity_reply') {
+      const probe = pending.get(data.nonce);
+      if (probe && probe.child === event.source) probe.resolve(data.documentToken);
+    }
+  });
+  function frameImage(video) {
+    if (!visible(video) || video.readyState < 2 || !video.videoWidth || !video.videoHeight) return '';
+    const canvas = document.createElement('canvas');
     try {
-      const url = new URL(value, document.baseURI);
-      return /^https?:$/.test(url.protocol) ? url.href : '';
-    } catch { return ''; }
+      const scale = Math.min(1, 320 / video.videoWidth, 180 / video.videoHeight);
+      canvas.width = Math.max(1, Math.floor(video.videoWidth * scale));
+      canvas.height = Math.max(1, Math.floor(video.videoHeight * scale));
+      canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
+      const data = canvas.toDataURL('image/jpeg', 0.72);
+      return data.startsWith('data:image/jpeg;base64,') && data.length <= 128 * 1024 ? data : '';
+    } catch { return ''; } // Tainted canvas / undecoded frame: keep poster, never play or seek.
+    finally { canvas.width = 0; canvas.height = 0; }
   }
-  function meta(name) {
-    return document.querySelector(`meta[property="${name}"], meta[name="${name}"]`)?.content || '';
-  }
-  function read() {
-    const videos = [...document.querySelectorAll('video')];
-    const playing = videos.filter(video => !video.paused && !video.ended && video.getClientRects().length);
-    const video = videos.length === 1 ? videos[0] : playing.length === 1 ? playing[0] : null;
+  async function read(probeChildren = true, imageRequests = {}) {
+    const children = probeChildren ? await Promise.all([...document.querySelectorAll('iframe, frame')].map(async node => {
+      const nonce = crypto.randomUUID(), child = node.contentWindow;
+      const token = await new Promise(resolve => {
+        const timer = setTimeout(() => { pending.delete(nonce); resolve(null); }, 120);
+        pending.set(nonce, { child, resolve: token => { clearTimeout(timer); pending.delete(nonce); resolve(token); } });
+        try { child?.postMessage({ type: 'viddow_identity_probe', nonce }, '*'); }
+        catch { clearTimeout(timer); pending.delete(nonce); resolve(null); }
+      });
+      return { documentToken: token, visible: visible(node) };
+    })) : [];
+    const media = [...document.querySelectorAll('video')].map(video => {
+      const { id, generation, src } = identity(video);
+      return { id, generation, src, visible: visible(video), poster: httpUrl(video.poster), posterSource: 'player',
+        frameImage: imageRequests[documentToken]?.includes(id) ? frameImage(video) : '',
+        duration: Number.isFinite(video.duration) && video.duration > 0 ? video.duration : null,
+        durationSource: 'player', isLive: video.duration === Infinity };
+    });
     const pageVideo = /^video[.:]/i.test(meta('og:type')) || Boolean(meta('og:video') || meta('og:video:url'));
     const pageDuration = Number(meta('video:duration') || meta('og:video:duration'));
-    const duration = video && Number.isFinite(video.duration) && video.duration > 0 ? video.duration
-      : videos.length <= 1 && pageVideo && Number.isFinite(pageDuration) && pageDuration > 0 ? pageDuration : null;
-    const poster = httpUrl(video?.poster || meta('og:image') || meta('twitter:image'));
-    return { url: location.href, poster, posterSource: video?.poster ? 'player' : 'page',
-      duration, durationSource: video && Number.isFinite(video.duration) && video.duration > 0 ? 'player' : 'page',
-      isLive: Boolean(video && video.duration === Infinity), hasPlayer: Boolean(video), hasVideoMetadata: pageVideo };
+    return { documentToken, pageDuration: pageVideo && Number.isFinite(pageDuration) && pageDuration > 0 ? pageDuration : null, url: location.href, children, media, hasPlayer: media.length > 0,
+      hasVideoMetadata: pageVideo, pageImage: httpUrl(meta('og:image') || meta('twitter:image')) };
   }
-  if (!globalThis.__viddowPreviewWatch) {
-    globalThis.__viddowPreviewWatch = true;
-    let timer;
-    const changed = () => {
-      clearTimeout(timer);
-      timer = setTimeout(() => {
-        chrome.runtime.sendMessage({ type: 'page_preview_changed' }).catch(() => {});
-      }, 150);
-    };
-    for (const event of ['loadedmetadata', 'durationchange', 'emptied']) document.addEventListener(event, changed, true);
-    document.addEventListener('load', event => { if (event.target.tagName === 'IFRAME') changed(); }, true);
-    new MutationObserver(records => {
-      const mediaNode = node => node.tagName === 'VIDEO' || node.tagName === 'IFRAME' || node.querySelector?.('video, iframe');
-      if (records.some(record => record.type === 'attributes' || [...record.addedNodes, ...record.removedNodes].some(mediaNode))) changed();
-    }).observe(document.documentElement, { subtree: true, childList: true, attributes: true, attributeFilter: ['poster'] });
-    if (document.head) new MutationObserver(changed).observe(document.head, { subtree: true, childList: true, attributes: true, attributeFilter: ['content'] });
-  }
-  return read();
+  globalThis.__viddowReadPreview = read;
+  let timer;
+  const changed = event => {
+    if (event?.type === 'emptied' && event.target.tagName === 'VIDEO') identity(event.target).generation++;
+    // Immediate invalidation; the panel debounces the subsequent read.
+    if (!timer) chrome.runtime.sendMessage({ type: 'page_preview_changed' }).catch(() => {});
+    clearTimeout(timer); timer = setTimeout(() => { timer = null; chrome.runtime.sendMessage({ type: 'page_preview_changed' }).catch(() => {}); }, 150);
+  };
+  for (const event of ['loadedmetadata', 'loadeddata', 'durationchange', 'emptied', 'pause', 'seeked']) document.addEventListener(event, changed, true);
+  document.addEventListener('load', event => { if (event.target.tagName === 'IFRAME') changed(); }, true);
+  new MutationObserver(records => {
+    const mediaNode = node => ['VIDEO', 'SOURCE', 'IFRAME', 'FRAME'].includes(node.tagName) || node.querySelector?.('video, iframe');
+    if (records.some(record => record.type === 'attributes' || [...record.addedNodes, ...record.removedNodes].some(mediaNode))) changed();
+  }).observe(document.documentElement, { subtree: true, childList: true, attributes: true,
+    attributeFilter: ['poster', 'src', 'hidden', 'style', 'class'] });
+  if (document.head) new MutationObserver(changed).observe(document.head, { subtree: true, childList: true, attributes: true, attributeFilter: ['content'] });
+  return read(false);
 })();

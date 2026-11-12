@@ -40,3 +40,12 @@ test('at capacity fresh URLs replace oldest; refreshed URLs stay recent', () => 
   assert.equal(items.some(item => item.url === 'https://cdn.example/1.m3u8'), false);
   assert.equal(items.some(item => item.url === 'https://cdn.example/0.m3u8'), true);
 });
+
+test('same URL in different documents keeps separate headers and groups', () => {
+  const source = { url: 'https://cdn.test/master.m3u8?token=full', frameId: 2, documentId: 'one', headers: { Cookie: 'one' } };
+  let items = rememberStream([], source);
+  items = rememberStream(items, { ...source, documentId: 'two', headers: { Cookie: 'two' } });
+  assert.equal(items.length, 2);
+  assert.equal(items[0].headers.Cookie, 'one');
+  assert.equal(groupStreams(items).length, 2);
+});
