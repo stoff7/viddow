@@ -1,5 +1,6 @@
 """Одна очередь для всех вкладок расширения через постоянный Native Messaging-канал."""
 import os
+from concurrent.futures import ThreadPoolExecutor
 import shutil
 import subprocess
 import threading
@@ -38,6 +39,7 @@ class Session:
         self.send = send
         self.id = uuid.uuid4().hex
         self.inspector = Inspector()
+        self._previews = ThreadPoolExecutor(max_workers=2, thread_name_prefix="media-preview")
         self._publish_lock = threading.Lock()
         self.manager.restore_history(history or [])
 
@@ -57,7 +59,7 @@ class Session:
             result = {}
             if command == "download":
                 if message.get("analysis_id") is not None:
-                    urls, options = self.inspector.selection(message["analysis_id"], message.get("format_ids"))
+                    urls, options = self.inspector.selection(message["analysis_id"], message.get("format_ids"), message.get("source_id"))
                 else:
                     urls, options = download_options(message)
                     if self.youtube_browser != "none":
@@ -69,7 +71,31 @@ class Session:
                     raise ValueError("Для анализа выберите один адрес")
                 if self.youtube_browser != "none":
                     options["cookie_browser"] = self.youtube_browser
-                result = self.inspector.start(urls[0], **options)
+                candidates = message.get('fallbacks', [])
+                if not isinstance(candidates, list) or len(candidates) > 6:
+                    raise ValueError('Допускается до 6 видео для подготовки')
+                fallbacks = []
+                for item in candidates:
+                    candidate_urls, candidate_options = download_options(item)
+                    if len(candidate_urls) != 1 or candidate_options.get('stream_kind') not in ('HLS', 'DASH'):
+                        raise ValueError('Для подготовки нужен один HLS/DASH источник')
+                    fallbacks.append({'url': candidate_urls[0], 'options': candidate_options})
+                fallback_only = message.get('fallback_only', False)
+                if type(fallback_only) is not bool or fallback_only and not fallbacks:
+                    raise ValueError('Нет видео для запасной подготовки')
+                result = self.inspector.start(urls[0], fallbacks=fallbacks, fallback_only=fallback_only, **options)
+            elif command == 'preview':
+                identifier, source_id = message.get('analysis_id'), message.get('source_id')
+                if not isinstance(identifier, str) or not isinstance(source_id, str):
+                    raise ValueError('Нужны ID анализа и видео')
+                future = self._previews.submit(self.inspector.preview, identifier, source_id)
+                def respond(done):
+                    try:
+                        self.send({'type': 'reply', 'request_id': request_id, 'ok': True, 'result': done.result()})
+                    except Exception:
+                        self.send({'type': 'reply', 'request_id': request_id, 'ok': False, 'error': 'Превью недоступно для этого видео.'})
+                future.add_done_callback(respond)
+                return
             elif command == "inspect_cancel":
                 identifier = message.get("analysis_id")
                 if not isinstance(identifier, str):
@@ -148,3 +174,4 @@ class Session:
                 self.manager.close()
             finally:
                 self.inspector.close()
+                self._previews.shutdown(wait=True, cancel_futures=True)

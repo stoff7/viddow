@@ -2,7 +2,7 @@
 export function mediaKey(tabId, frame, media) {
   return JSON.stringify([tabId, frame.result.documentToken, frame.frameId, media.id, media.generation]);
 }
-export function visibleMedia(tabId, frames, latest = frames) {
+export function visibleDocuments(frames, latest = frames) {
   const byToken = new Map(frames.map(frame => [frame.result?.documentToken, frame]));
   const fresh = new Map(latest.map(frame => [frame.result?.documentToken, frame]));
   const top = frames.find(frame => frame.frameId === 0);
@@ -14,6 +14,11 @@ export function visibleMedia(tabId, frames, latest = frames) {
     for (const edge of data.children || []) if (edge.visible && now.result?.children?.some(current => current.visible && current.documentToken === edge.documentToken)) visit(byToken.get(edge.documentToken));
   }
   visit(top);
+  return frames.filter(frame => reachable.has(frame.result?.documentToken));
+}
+export function visibleMedia(tabId, frames, latest = frames) {
+  const reachable = new Set(visibleDocuments(frames, latest).map(frame => frame.result.documentToken));
+  const fresh = new Map(latest.map(frame => [frame.result?.documentToken, frame]));
   return frames.flatMap(frame => {
     const data = frame.result, now = fresh.get(data?.documentToken)?.result;
     if (!reachable.has(data?.documentToken)) return [];

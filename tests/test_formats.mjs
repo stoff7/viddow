@@ -46,3 +46,10 @@ test('short labels keep unknown sound explicit and technical IDs in details', ()
   assert.match(audioLabel({ kind: 'audio' }), /Язык не указан/);
   assert.match(audioLabel({ kind: 'audio', language: 'ru' }), /русский/);
 });
+
+test('implausible frame rates do not appear in labels or dominate sorting', () => {
+  const bad = { id: 'bad', kind: 'combined', height: 720, fps: 22500 };
+  assert.equal(formatLabel(bad).includes('22500'), false);
+  assert.equal(qualityLabel(bad).includes('22500'), false);
+  assert.equal(mainFormats([bad, { ...bad, id: 'good', fps: 30 }])[0].id, 'good');
+});

@@ -11,7 +11,8 @@ const STATUS = { queued: 'В очереди', running: 'Скачиваем', can
 let tab = null, tabKey = '', items = [], state = { jobs: [], settings: {} }, online = false;
 let filter = 'all', settingsDirty = false, refreshRevision = 0, hostRevision = 0;
 let analysisKey = '', dismissedAnalysis = '', inspectPending = false, selectionPending = false;
-let currentDownload = null;
+let currentDownload = null, preparationState = null, selectedVideoId = '';
+const videoPreviews = new Map(), videoPreviewPending = new Set();
 let currentCandidates = [], imageWindowKeys = [], imageScrollTimer;
 let previewRevision = 0, selectedMedia = null, previewDocument = null;
 let pagePreview = null, previewKey = '', autoTimer = null, autoScheduledKey = '';
@@ -68,12 +69,12 @@ function controls() {
   $('settingsHint').textContent = active ? 'Настройки можно изменить, когда активные загрузки завершатся или будут отменены.' : '';
   $('clear').disabled = !online || !state.jobs.some((job) => !ACTIVE.has(job.status));
   const analysing = inspectPending || ['running', 'cancelling'].includes(state.analysis?.status);
-  $('inspectPage').disabled = !online || analysing || !validUrl(tab?.url);
+  $('inspectPage').disabled = !online || inspectPending || !validUrl(tab?.url) || Boolean(currentPreparation()?.downloadPending);
   $('inspectLink').disabled = !online || analysing;
   const reason = !online ? 'Подключите локальный помощник, чтобы продолжить.' : analysing ? 'Идёт подготовка. Дождитесь результата или отмените её.' : '';
   $('prepareHint').textContent = reason || (validUrl(tab?.url) ? 'Когда появится видео, подготовим качество и звук автоматически.' : 'Откройте страницу с видео в этой вкладке.');
   $('linkHint').textContent = reason;
-  $('cancelAnalysis').disabled = !online || state.analysis?.status !== 'running';
+  $('cancelAnalysis').disabled = !online || !(state.analysis?.status === 'running' || recovering());
   updateFormatChoice();
 }
 async function refreshTab() {
@@ -254,11 +255,11 @@ $('openJobs').onclick = () => view('jobs');
 async function start(item, title = '', page = '') {
   added(await send({ type: 'download', item, title, page }));
 }
-async function inspect(item, title = '', page = '', automatic = false) {
+async function inspect(item, title = '', page = '', automatic = false, downloadAfterPrepare = false) {
   if (!automatic && item.kind) { selectedMedia = { url: item.url, frameId: item.frameId, documentId: item.documentId }; clearPreview(); refreshPreview(); }
   inspectPending = true; controls(); notice('');
   try {
-    const result = await send({ type: 'inspect', item, title, page, automatic, tabId: tab?.id,
+    const result = await send({ type: 'inspect', item, title, page, automatic, downloadAfterPrepare, selectedMediaKey: selectedMedia?.key || null, tabId: tab?.id,
       session: state.session, expected_analysis_id: state.analysis?.id || null });
     if (result.skipped) return;
     dismissedAnalysis = ''; renderAnalysis();
@@ -266,8 +267,75 @@ async function inspect(item, title = '', page = '', automatic = false) {
   } catch (error) { notice(error.message, true); }
   finally { inspectPending = false; controls(); renderStreams(); }
 }
+function currentPreparation() {
+  const current = preparationState;
+  if (!current || current.session !== state.session || current.tabId !== tab?.id || current.page !== tab?.url) return null;
+  if (current.analysisId !== state.analysis?.id && !(current.phase === 'recovering' && state.analysis?.page === current.page)) return null;
+  return current;
+}
+function recovering() { const current = currentPreparation(); return ['waiting', 'recovering'].includes(current?.phase) || current?.phase === 'page' && state.analysis?.error_code === 'unsupported_source'; }
+function videoResult() {
+  const result = state.analysis?.result;
+  return result?.videos?.find(video => video.id === selectedVideoId) || result;
+}
+function renderVideoImages() {
+  const analysis = state.analysis, result = videoResult();
+  if (!result || analysis?.status !== 'done') return;
+  const cacheKey = id => `${state.session}:${analysis.id}:${id}`;
+  const videos = analysis.result.videos || [];
+  const imageFor = video => {
+    const matches = items.filter(item => item.url === (video.source_url || analysis.url));
+    const media = matches.length === 1 ? selectMedia(currentCandidates, matches[0]) : null;
+    return videoPreviews.get(cacheKey(video.id)) || media?.frameImage || video.thumbnail || media?.poster || '';
+  };
+  const image = imageFor(result);
+  $('videoThumbnail').hidden = !image;
+  $('videoImageMissing').hidden = Boolean(image);
+  $('videoImageMissing').textContent = videos.length && !videoPreviews.has(cacheKey(result.id)) ? 'Готовим превью…' : 'Превью недоступно';
+  if (image) { if ($('videoThumbnail').getAttribute('src') !== image) $('videoThumbnail').src = image; }
+  else $('videoThumbnail').removeAttribute('src');
+  $('videoThumbnail').alt = image.startsWith('data:image/gif') ? 'Короткое превью выбранного видео' : 'Изображение выбранного видео';
+  $('videoThumbnail').onerror = () => { $('videoThumbnail').hidden = true; $('videoImageMissing').hidden = false; $('videoImageMissing').textContent = 'Превью недоступно'; };
+  const container = $('analysisVideos');
+  container.hidden = videos.length < 2;
+  if (container.dataset.analysis !== `${state.session}:${analysis.id}`) {
+    container.replaceChildren(...videos.map((video, index) => {
+      const button = el('button', 'player-option'); button.type = 'button'; button.dataset.source = video.id;
+      const img = el('img'); img.alt = ''; img.referrerPolicy = 'no-referrer';
+      const missing = el('span', 'player-image-missing', 'Готовим превью…');
+      img.onerror = () => { img.hidden = true; missing.hidden = false; missing.textContent = 'Превью недоступно'; };
+      button.append(img, missing, el('span', '', `Видео ${index + 1} · ${qualityLabel(mainFormats(video.formats)[0])}`));
+      button.onclick = () => { selectedVideoId = video.id; analysisKey = ''; renderAnalysis(); controls(); };
+      return button;
+    }));
+    container.dataset.analysis = `${state.session}:${analysis.id}`;
+  }
+  for (const button of container.children) {
+    const video = videos.find(video => video.id === button.dataset.source);
+    const [img, missing] = button.children, image = imageFor(video);
+    img.hidden = !image; missing.hidden = Boolean(image);
+    if (image && img.getAttribute('src') !== image) img.src = image;
+    if (!image && videoPreviews.has(cacheKey(video.id))) missing.textContent = 'Превью недоступно';
+    button.setAttribute('aria-pressed', String(video.id === selectedVideoId));
+  }
+  for (const video of [...videos].sort((a, b) => Number(b.id === selectedVideoId) - Number(a.id === selectedVideoId))) {
+    const key = cacheKey(video.id);
+    if (videoPreviews.has(key) || videoPreviewPending.has(key)) continue;
+    videoPreviewPending.add(key);
+    const session = state.session, analysisId = analysis.id;
+    send({ type: 'preview', session, analysis_id: analysisId, source_id: video.id }).then(reply => {
+      if (session !== state.session || analysisId !== state.analysis?.id || reply.source_id !== video.id) return;
+      videoPreviews.set(key, /^data:image\/gif;base64,[A-Za-z0-9+/=]+$/.test(reply.image || '') && reply.image.length <= 128 * 1024 ? reply.image : null);
+    }).catch(() => { videoPreviews.set(key, null); }).finally(() => {
+      videoPreviewPending.delete(key);
+      while (videoPreviews.size > 12) videoPreviews.delete(videoPreviews.keys().next().value);
+      if (session === state.session && analysisId === state.analysis?.id) renderVideoImages();
+    });
+  }
+}
+$('videoChoice').onchange = () => { selectedVideoId = $('videoChoice').value; analysisKey = ''; renderAnalysis(); controls(); };
 function selectedFormats() {
-  const main = state.analysis?.result?.formats.find(format => format.id === $('videoFormat').value);
+  const main = videoResult()?.formats.find(format => format.id === $('videoFormat').value);
   const audio = main?.kind === 'video' && !$('silentVideo').checked
     ? [...$('audioFormats').querySelectorAll('input:checked')].map(input => input.value) : [];
   return { main, audio };
@@ -276,20 +344,21 @@ function updateFormatChoice() {
   const { main, audio } = selectedFormats();
   const problem = choiceProblem(main, audio, state.tools?.ffmpeg, $('silentVideo').checked);
   $('audioChoices').hidden = main?.kind !== 'video';
-  $('downloadFormat').disabled = !online || state.analysis?.status !== 'done' || Boolean(problem) || selectionPending;
-  $('formatDetails').textContent = main ? [formatLabel(main), ...audio.map(id => formatLabel(state.analysis.result.formats.find(format => format.id === id)))].join('\n') : '';
+  $('downloadFormat').disabled = !online || state.analysis?.status !== 'done' || Boolean(problem) || selectionPending || Boolean(currentPreparation()?.downloadPending);
+  $('formatDetails').textContent = main ? [formatLabel(main), ...audio.map(id => formatLabel(videoResult().formats.find(format => format.id === id)))].join('\n') : '';
   $('formatHint').textContent = !online ? 'Подключите локальный помощник, чтобы скачать выбранное.' : problem || (main?.kind === 'combined' ? 'Звук уже встроен в этот формат.' : main?.kind === 'unknown'
     ? 'Состав дорожек не указан источником. Скачается выбранный формат.' : $('silentVideo').checked ? 'Будет сохранено видео без звука.' : main?.kind === 'audio' ? 'Будет сохранён только звук.' : 'Будут сохранены выбранные дорожки.');
 }
 function renderAnalysis() {
   const analysis = state.analysis;
   const visible = Boolean(analysis && `${state.session}:${analysis.id}` !== dismissedAnalysis);
-  const running = ['running', 'cancelling'].includes(analysis?.status);
-  const preparingPage = visible && running && analysis.url === tab?.url;
+  const running = ['running', 'cancelling'].includes(analysis?.status) || recovering();
+  const preparingPage = visible && running && (analysis.url === tab?.url || recovering());
   $('analysisCard').hidden = !visible;
   $('analysisIdentity').hidden = preparingPage;
   $('currentPage').hidden = visible && !preparingPage;
-  $('inspectPage').hidden = preparingPage;
+  $('inspectPage').hidden = false;
+  $('inspectPage').textContent = currentPreparation()?.downloadPending ? 'Скачивание начнётся после подготовки…' : preparingPage ? 'Скачать после подготовки' : 'Скачать';
   $('prepareHint').hidden = preparingPage;
   $('pageAlternative').hidden = !validUrl(tab?.url) || (visible && analysis.url !== tab?.url);
   if (!analysis) { analysisKey = ''; $('analysisResult').hidden = true; updateFormatChoice(); return; }
@@ -297,26 +366,34 @@ function renderAnalysis() {
   $('analysisSource').textContent = sourceUrl.host + decoded(sourceUrl.pathname);
   $('analysisSource').title = sourceUrl.host + decoded(sourceUrl.pathname);
   $('analysisUrl').textContent = analysis.url;
-  $('analysisContext').hidden = analysis.url === tab?.url;
+  $('analysisContext').hidden = analysis.url === tab?.url || analysis.page === tab?.url;
   $('cancelAnalysis').hidden = !running;
   $('closeAnalysis').hidden = running;
-  $('analysisStatus').textContent = analysis.status === 'running' ? 'Ищем видео и доступные варианты… Скачивание ещё не началось.' : analysis.status === 'cancelling'
-    ? 'Останавливаем подготовку…' : analysis.status === 'error' ? analysis.error : analysis.status === 'cancelled' ? 'Подготовка отменена. Можно вернуться к текущей вкладке и попробовать снова.' : analysis.result?.formats?.length ? 'Проверьте качество и звук перед скачиванием.' : 'Источник не передал варианты. Можно скачать без выбора качества.';
-  $('analysisStatus').classList.toggle('error', analysis.status === 'error');
+  $('analysisStatus').textContent = currentPreparation()?.error || (currentPreparation()?.phase === 'cancelled' ? 'Подготовка отменена. Можно попробовать снова.' : recovering() ? currentPreparation().phase === 'waiting' ? 'Ждём появления видео на странице…' : 'Проверяем найденные видео и выбираем лучший вариант…' : analysis.status === 'running' ? 'Ищем видео и доступные варианты… Скачивание ещё не началось.' : analysis.status === 'cancelling'
+    ? 'Останавливаем подготовку…' : analysis.status === 'error' ? analysis.error : analysis.status === 'cancelled' ? 'Подготовка отменена. Можно вернуться к текущей вкладке и попробовать снова.' : analysis.result?.formats?.length ? 'Видео готово к скачиванию.' : 'Источник не передал варианты. Можно скачать без выбора качества.');
+  $('analysisStatus').classList.toggle('error', Boolean(currentPreparation()?.error) || analysis.status === 'error' && !recovering() && currentPreparation()?.phase !== 'cancelled');
   $('analysisDiagnostic').hidden = !analysis.error_detail || analysis.error_detail === analysis.error;
   $('analysisErrorDetail').textContent = analysis.error_detail || '';
   $('analysisResult').hidden = analysis.status !== 'done' || !analysis.result?.formats?.length;
   $('analysisFallback').hidden = running || (analysis.status === 'done' && Boolean(analysis.result?.formats?.length));
-  const key = `${state.session}:${analysis.id}:${analysis.status}`;
+  const videos = analysis.result?.videos || [];
+  const identity = `${state.session}:${analysis.id}:${videos.map(video => video.id).join(',')}`;
+  if ($('videoChoice').dataset.analysis !== identity) {
+    selectedVideoId = analysis.result?.source_id || '';
+    $('videoChoice').replaceChildren(...videos.map((video, index) => Object.assign(el('option', '',
+      `Видео ${index + 1} · ${qualityLabel(mainFormats(video.formats)[0])}${index === 0 ? ' · Рекомендуем' : ''}`), { value: video.id })));
+    $('videoChoice').dataset.analysis = identity;
+  }
+  $('videoChoiceLabel').hidden = videos.length < 2;
+  $('videoChoice').value = selectedVideoId;
+  const key = `${state.session}:${analysis.id}:${analysis.status}:${selectedVideoId}`;
   if (key !== analysisKey && analysis.status === 'done') {
-    const result = analysis.result;
+    const result = videoResult();
     $('videoTitle').textContent = result.title;
     $('videoTitle').title = result.title;
     $('videoFacts').textContent = durationLabel(result);
-    $('videoThumbnail').hidden = !result.thumbnail;
-    if (result.thumbnail) $('videoThumbnail').src = result.thumbnail;
-    else $('videoThumbnail').removeAttribute('src');
-    $('videoThumbnail').onerror = () => { $('videoThumbnail').hidden = true; };
+    if (result.source_url) { const source = new URL(result.source_url); $('analysisSource').textContent = source.host + decoded(source.pathname); $('analysisUrl').textContent = result.source_url; }
+    renderVideoImages();
     const defaults = defaultChoice(result.formats, state.tools?.ffmpeg);
     const formats = mainFormats(result.formats);
     const labels = formats.map(qualityLabel);
@@ -336,7 +413,7 @@ function renderAnalysis() {
   analysisKey = key;
   updateFormatChoice();
 }
-$('inspectPage').onclick = () => inspect({ url: tab.url, source_kind: 'page' }, tab.title, tab.url);
+$('inspectPage').onclick = () => inspect({ url: tab.url, source_kind: 'page' }, tab.title, tab.url, false, true);
 $('inspectLink').onclick = () => {
   const url = $('manualUrl').value.trim();
   if (!validUrl(url)) { notice('Нужен адрес http:// или https://', true); return; }
@@ -361,7 +438,7 @@ $('formatForm').onsubmit = async event => {
   selectionPending = true; controls();
   try {
     added(await send({ type: 'download_selection', analysis_id: state.analysis.id,
-      format_ids: [main.id, ...audio], session: state.session }));
+      format_ids: [main.id, ...audio], source_id: selectedVideoId || undefined, session: state.session }));
   } catch (error) { notice(error.message, true); }
   finally { selectionPending = false; controls(); }
 };
@@ -560,13 +637,7 @@ async function connect() {
   catch (error) { renderHost({ status: 'offline', error: error.message }); }
 }
 $('reconnect').onclick = connect;
-$('page').onclick = async () => {
-  const current = tab;
-  $('page').dataset.busy = '1'; controls();
-  try { await start({ url: current.url, source_kind: 'page' }, current.title, current.url); }
-  catch (error) { notice(error.message, true); }
-  finally { delete $('page').dataset.busy; controls(); }
-};
+$('page').onclick = () => $('inspectPage').click();
 $('linkForm').onsubmit = async (event) => {
   event.preventDefault();
   const url = $('manualUrl').value.trim();
@@ -603,11 +674,14 @@ chrome.tabs.onActivated.addListener((info) => { if (info.windowId === ownWindow.
 chrome.tabs.onUpdated.addListener((id, changes) => { if (id === tab?.id && (changes.url || changes.title || changes.status)) refreshTab(); });
 chrome.storage.session.onChanged.addListener((changes) => {
   if (changes[tabKey]) { items = changes[tabKey].newValue || []; renderStreams(); }
+  if (changes.preparation) { preparationState = changes.preparation.newValue; renderAnalysis(); controls(); }
+  if (changes.smartDownload) { const result = changes.smartDownload.newValue; if (result?.tabId === tab?.id && result.session === state.session) added(result); }
   if (changes.nativeState) renderState(changes.nativeState.newValue);
   if (changes.host) renderHost(changes.host.newValue);
   if (changes.historyStatus) renderHistoryStatus(changes.historyStatus.newValue);
 });
-const stored = await chrome.storage.session.get(['nativeState', 'host', 'historyStatus']);
+const stored = await chrome.storage.session.get(['nativeState', 'host', 'historyStatus', 'preparation']);
+preparationState = stored.preparation;
 const history = decodeHistory(preferences.history);
 renderState(stored.nativeState || { jobs: offlineJobs(history.history), settings: preferences.settings || {} }); renderHost(stored.host);
 renderHistoryStatus(stored.historyStatus || { warning: history.warning });

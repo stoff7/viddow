@@ -1,6 +1,7 @@
+export const validFps = value => Number.isFinite(value) && value > 0 && value <= 240 ? value : null;
 export function formatLabel(format) {
   const pieces = [format.height ? `${format.height}p` : format.kind === 'audio' ? 'Звук' : 'Разрешение неизвестно'];
-  if (format.fps) pieces.push(`${format.fps} fps`);
+  if (validFps(format.fps)) pieces.push(`${validFps(format.fps)} fps`);
   if (format.language) pieces.push(format.language);
   if (format.ext) pieces.push(format.ext);
   if (format.kind === 'video') pieces.push('без звука');
@@ -14,12 +15,12 @@ export function formatLabel(format) {
 export function mainFormats(formats) {
   const video = formats.filter(format => format.kind !== 'audio');
   return (video.length ? video : formats).slice().sort((a, b) =>
-    (b.height || 0) - (a.height || 0) || (b.fps || 0) - (a.fps || 0) || (b.tbr || 0) - (a.tbr || 0));
+    (b.height || 0) - (a.height || 0) || (validFps(b.fps) || 0) - (validFps(a.fps) || 0) || (b.tbr || 0) - (a.tbr || 0));
 }
 
 export function qualityLabel(format) {
   const quality = format.kind === 'audio' ? 'Только звук' : format.height ? `${format.height}p` : 'Качество неизвестно';
-  return [quality, format.fps ? `${format.fps} fps` : '', format.ext,
+  return [quality, validFps(format.fps) ? `${validFps(format.fps)} fps` : '', format.ext,
     format.kind === 'combined' ? 'со звуком' : format.kind === 'unknown' ? 'звук неизвестен' : ''].filter(Boolean).join(' · ');
 }
 

@@ -282,6 +282,7 @@ const { extensionPath, openPanel } = require('./extension_browser.cjs');
     assert.equal((await worker.evaluate(() => chrome.storage.local.get('settings'))).settings.youtube_browser, 'vivaldi');
     await panel.locator('[data-view=jobs]').click();
     await panel.locator('.job.error').getByRole('button', { name: 'Обновить ссылку', exact: true }).click();
+    await panel.waitForFunction(async () => { const value = await chrome.storage.session.get('nativeState'); return value.nativeState?.analysis?.url === 'https://www.youtube.com/watch?v=public_test'; });
     const freshYoutube = await worker.evaluate(() => globalThis.__nativeCalls.at(-1));
     assert.equal(freshYoutube.command, 'inspect'); assert.equal(freshYoutube.source_kind, 'page');
     assert.equal(freshYoutube.urls[0], 'https://www.youtube.com/watch?v=public_test');

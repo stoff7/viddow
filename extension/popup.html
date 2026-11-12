@@ -27,20 +27,22 @@
       <div id="playerImages" class="player-images" aria-label="Выбор видео по картинке" hidden></div>
       <select id="playerChoice" aria-label="Плеер для метаданных" hidden></select>
       <p id="pageFacts" class="muted" hidden></p>
-      <button id="inspectPage" class="button primary wide" aria-describedby="prepareHint">Подготовить скачивание</button>
+      <button id="inspectPage" class="button primary wide" aria-describedby="prepareHint">Скачать</button>
       <p id="prepareHint" class="page-note">Когда появится видео, подготовим качество и звук автоматически.</p>
     </div>
     <section id="analysisCard" aria-label="Подготовка скачивания" hidden>
       <div id="analysisIdentity">
-      <div class="section-heading"><h2>Выбранный источник</h2><button id="closeAnalysis" class="text-button" type="button">К текущей вкладке</button></div>
-      <p id="analysisSource" class="muted"></p>
-      <details class="source-detail"><summary>Адрес источника</summary><code id="analysisUrl"></code></details>
+      <div class="section-heading"><h2>Видео для скачивания</h2><button id="closeAnalysis" class="text-button" type="button">К текущей вкладке</button></div>
+      <details class="source-detail"><summary>Технические подробности видео</summary><p id="analysisSource" class="muted"></p><code id="analysisUrl"></code></details>
       <p id="analysisContext" class="field-note" hidden>Открыта другая страница. Выбор относится к указанному выше источнику.</p>
       </div>
       <p id="analysisStatus" role="status" tabindex="-1"></p>
       <details id="analysisDiagnostic" class="explanation" hidden><summary>Техническая причина</summary><code id="analysisErrorDetail"></code></details>
       <button id="cancelAnalysis" class="text-button" type="button" hidden>Отменить подготовку</button>
       <div id="analysisResult" hidden>
+        <div id="analysisVideos" class="player-images" aria-label="Найденные видео" hidden></div>
+        <label id="videoChoiceLabel" hidden>Видео<select id="videoChoice" aria-label="Видео для скачивания"></select></label>
+        <p id="videoImageMissing" class="player-image-missing" hidden>Готовим превью…</p>
         <img id="videoThumbnail" alt="Обложка видео" referrerpolicy="no-referrer" hidden>
         <h3 id="videoTitle"></h3><p id="videoFacts" class="muted"></p>
         <form id="formatForm">
@@ -56,8 +58,8 @@
     <div id="currentDownload" class="current-download" hidden><p id="currentDownloadTitle"></p><p id="currentDownloadStatus" role="status"></p><progress id="currentDownloadProgress" max="1" aria-label="Прогресс скачивания"></progress><button id="openJobs" class="text-button" type="button">Открыть загрузки</button></div>
   </div>
   <details id="streamPicker" class="alternative">
-    <summary>Видео не найдено? Выбрать поток <span id="foundCount"></span></summary>
-    <p class="field-note">Запустите видео на странице. Каждый поток можно подготовить или скачать напрямую.</p>
+    <summary>Технические подробности <span id="foundCount"></span></summary>
+    <p class="field-note">Обнаруженные сетевые адреса. Обычно видео выбирается автоматически выше.</p>
     <div class="section-heading"><h2>Найденные потоки</h2><span class="muted" id="addressCount"></span></div>
     <div id="streamsEmpty" class="empty"><h3>Пока нет потоков</h3><p>Запустите видео на текущей странице.</p></div>
     <ul id="streams" class="stream-list"></ul>

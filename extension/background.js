@@ -1,3 +1,5 @@
+import { VideoPreparation } from './preparation.mjs';
+import { pageContext } from './page-context.mjs';
 import { rememberStream, groupStreams } from './stream-model.mjs';
 import { decodeHistory, historyFromJobs } from './history-model.mjs';
 import { recordDiagnostic, readDiagnostics, clearDiagnostics, diagnosticCode } from './diagnostics.mjs';
@@ -23,7 +25,7 @@ function update(storageKey, change, afterWrite) {
 }
 function updateTab(tabId, change) {
   return update(key(tabId), (value) => change(value || []), (items) =>
-    chrome.action.setBadgeText({ tabId, text: items.length ? String(groupStreams(items).length) : '' }));
+    chrome.action.setBadgeText({ tabId, text: items.length ? String(groupStreams(items).length) : '' })).then(items => { preparation.observe(); return items; });
 }
 chrome.webRequest.onSendHeaders.addListener((details) => {
   if (details.tabId < 0) return;
@@ -52,6 +54,7 @@ chrome.webRequest.onHeadersReceived.addListener((details) => {
 chrome.webRequest.onBeforeRequest.addListener((details) => {
   if (details.tabId < 0) return;
   if (details.type === 'main_frame' || !tabGenerations.has(details.tabId)) {
+    if (preparation.current?.tabId === details.tabId) { preparation.cancel(); preparation.publish(); }
     tabGenerations.set(details.tabId, crypto.randomUUID());
     updateTab(details.tabId, () => []);
   }
@@ -59,6 +62,7 @@ chrome.webRequest.onBeforeRequest.addListener((details) => {
 }, { urls: ['<all_urls>'], types: ['main_frame', 'xmlhttprequest', 'media', 'other'] });
 chrome.webRequest.onCompleted.addListener(details => requestGenerations.delete(details.requestId), { urls: ['<all_urls>'] });
 chrome.tabs.onRemoved.addListener((tabId) => {
+  if (preparation.current?.tabId === tabId) { preparation.cancel(); preparation.publish(); }
   tabGenerations.delete(tabId);
   chain = chain.then(() => chrome.storage.session.remove(key(tabId))).catch(console.error);
 });
@@ -142,6 +146,8 @@ async function ensureHost() {
               return;
             }
             automaticSources.clear();
+            previewRequests.clear();
+            preparation.cancel(); preparation.publish();
             session = message.session;
           } else if (!ready || message.session !== session) return;
           const saved = update('nativeState', () => message, persistHistory);
@@ -149,6 +155,7 @@ async function ensureHost() {
           if (lastAnalysis !== analysisKey) {
             lastAnalysis = analysisKey;
             recordDiagnostic('analysis_state', { status: message.analysis?.status || 'cleared' });
+            saved.then(() => preparation.observe());
           }
           update('host', () => ({ status: 'online', error: null }));
           if (message.type === 'ready') {
@@ -192,7 +199,7 @@ async function command(message) {
       pending.delete(request_id);
       recordDiagnostic('command_error', { command: message.command, code: 'timeout', elapsed_ms: Date.now() - started });
       reject(new Error('Ответ задерживается. Проверьте список загрузок перед повтором.'));
-    }, 12000);
+    }, message.command === 'preview' ? 30000 : 12000);
     pending.set(request_id, { resolve, reject, timer, started, command: message.command });
     try { port.postMessage({ ...message, session, request_id }); }
     catch (error) {
@@ -202,17 +209,54 @@ async function command(message) {
     }
   });
 }
+const preparation = new VideoPreparation({
+  state: async () => (await chrome.storage.session.get('nativeState')).nativeState,
+  context: pageContext,
+  streams: async tabId => (await chrome.storage.session.get(key(tabId)))[key(tabId)] || [],
+  inspect: request => command({ command: 'inspect', ...request }),
+  download: request => command({ command: 'download', ...request }),
+  cancel: (analysis_id, session) => command({ command: 'inspect_cancel', analysis_id, session }),
+  publish: value => chrome.storage.session.set({ preparation: value }),
+  downloaded: (current, result) => chrome.storage.session.set({ smartDownload: {
+    tabId: current.tabId, session: current.session, ids: result.ids, token: crypto.randomUUID() } }),
+});
+chrome.tabs.onActivated.addListener(info => preparation.clearIntent(info.tabId));
+const previewRequests = new Map();
+async function startInspection(request, message, context) {
+  preparation.cancel(); await preparation.publish();
+  const result = await command(request);
+  if (message.item.source_kind === 'page' && context) {
+    await preparation.begin({ tabId: message.tabId, page: message.item.url,
+      documentToken: context.documentToken, mediaKeys: message.selectedMediaKey ? [message.selectedMediaKey] : context.mediaKeys, selectedMediaKey: message.selectedMediaKey || null, title: message.title || '', session, analysisId: result.analysis_id, download: Boolean(message.downloadAfterPrepare) });
+  }
+  return result;
+}
 async function handle(message) {
   if (message.type === 'diagnostic') { await recordDiagnostic(message.event, message.fields); return {}; }
   if (message.type === 'diagnostics_read') return { version: chrome.runtime.getManifest().version, entries: await readDiagnostics() };
   if (message.type === 'diagnostics_clear') { await clearDiagnostics(); return {}; }
   if (message.type === 'connect') { await ensureHost(); return {}; }
+  if (message.type === 'preview') {
+    const previewKey = JSON.stringify([message.session, message.analysis_id, message.source_id]);
+    if (!previewRequests.has(previewKey)) {
+      const pendingPreview = command({ command: 'preview', session: message.session,
+        analysis_id: message.analysis_id, source_id: message.source_id }).catch(error => { previewRequests.delete(previewKey); throw error; });
+      previewRequests.set(previewKey, pendingPreview);
+      while (previewRequests.size > 12) previewRequests.delete(previewRequests.keys().next().value);
+    }
+    return previewRequests.get(previewKey);
+  }
   if (message.type === 'download' || message.type === 'inspect') {
     const item = message.item;
     const request = { command: message.type, urls: [item.url], name: message.title || '',
       page: message.page || '', referer: item.referer || '', headers: item.headers || {},
       source_kind: item.source_kind || 'auto', stream_kind: item.kind || null };
-    if (message.type !== 'inspect' || !message.automatic) return command(request);
+    if (message.type !== 'inspect') return command(request);
+    let context = item.source_kind === 'page' && Number.isInteger(message.tabId) ? await pageContext(message.tabId) : null;
+    if (context && context.url !== item.url) { if (message.automatic) return { skipped: true }; context = null; }
+    if (message.downloadAfterPrepare && context && await preparation.requestDownload({ tabId: message.tabId,
+      page: item.url, session: message.session, selectedMediaKey: message.selectedMediaKey || null, documentToken: context.documentToken })) return { pending_download: true };
+    if (!message.automatic) return startInspection(request, message, context);
     // Panels share one inspector. An automatic request must not replace a newer
     // source selected in another panel while this request was waiting.
     if (autoInspectPending) return { skipped: true };
@@ -226,20 +270,23 @@ async function handle(message) {
       if (message.session !== session || (analysis?.id || null) !== message.expected_analysis_id
           || ['running', 'cancelling'].includes(analysis?.status) || analysis?.url === item.url || automaticSources.has(key)) return { skipped: true };
       automaticSources.add(key);
-      return await command({ ...request, session: message.session });
+      return await startInspection({ ...request, session: message.session }, message, context);
     } finally { autoInspectPending = false; }
   }
   if (message.type === 'download_selection') {
     return command({ command: 'download', analysis_id: message.analysis_id,
-      format_ids: message.format_ids, session: message.session });
+      format_ids: message.format_ids, source_id: message.source_id, session: message.session });
   }
   if (message.type === 'inspect_cancel') {
+    preparation.cancel(); await preparation.publish();
     return command({ command: 'inspect_cancel', analysis_id: message.analysis_id, session: message.session });
   }
   if (['cancel', 'retry', 'clear', 'reveal', 'inspect_history'].includes(message.type)) {
+    if (message.type === 'inspect_history') { preparation.cancel(); await preparation.publish(); }
     return command({ command: message.type, id: message.id, session: message.session });
   }
   if (message.type === 'configure') {
+    preparation.cancel(); await preparation.publish();
     const settings = await command({ command: 'configure', settings: message.settings });
     await chrome.storage.local.set({ settings });
     return settings;
@@ -248,7 +295,7 @@ async function handle(message) {
 }
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
   if (sender.id !== chrome.runtime.id) return;
-  if (message.type === 'page_preview_changed') return;
+  if (message.type === 'page_preview_changed') { preparation.observe(); return; }
   handle(message).then((result) => respond({ ok: true, result }), (error) => respond({ ok: false, error: error.message }));
   return true;
 });
