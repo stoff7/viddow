@@ -4,7 +4,7 @@ const EVENTS = new Set(['panel_start', 'panel_ready', 'panel_error', 'panel_stal
 const COMMANDS = new Set(['inspect', 'preview', 'inspect_cancel', 'inspect_history', 'download', 'cancel', 'retry', 'clear', 'configure', 'reveal']);
 const NAMES = new Set(['Error', 'TypeError', 'ReferenceError', 'SyntaxError', 'RangeError', 'DOMException']);
 const FILES = new Set(['popup.js', 'startup.js', 'background.js', 'format-model.mjs', 'history-model.mjs', 'stream-model.mjs', 'diagnostics.mjs']);
-const CODES = new Set(['host_not_found', 'timeout', 'protocol_mismatch', 'connection_lost', 'command_failed', 'unsupported_source', 'analysis_timeout', 'network', 'access_denied', 'source_unavailable', 'visible_document', 'current_generation', 'hidden_document', 'stale_generation', 'missing_scope', 'explicit_mismatch', 'no_streams', 'excluded_streams', 'missing_context']);
+const CODES = new Set(['host_not_found', 'timeout', 'protocol_mismatch', 'connection_lost', 'command_failed', 'unsupported_source', 'embedded_source_error', 'analysis_timeout', 'network', 'access_denied', 'source_unavailable', 'visible_document', 'current_generation', 'hidden_document', 'stale_generation', 'missing_scope', 'explicit_mismatch', 'no_streams', 'excluded_streams', 'missing_context']);
 const STATUSES = new Set(['running', 'cancelling', 'cancelled', 'done', 'error', 'cleared', 'page', 'waiting', 'blocked', 'recovering', 'choose', 'downloaded']);
 
 // Only fixed event names and explicitly allowed fields may leave the caller.

@@ -239,6 +239,29 @@ class InspectorTests(unittest.TestCase):
                 release.set()
                 wait_for(lambda: any(row.get('request_id') == 'preview' for row in sent))
 
+    def test_embedded_youtube_error_is_not_presented_as_the_parent_page_login_requirement(self):
+        def fail(*_):
+            raise RuntimeError('yt-dlp: ERROR: [youtube] fixture: Sign in to confirm you are not a bot')
+        inspector = self.inspector(fail)
+        inspector.start('https://anime.test/episode', source_kind='page')
+        wait_for(lambda: inspector.snapshot()['status'] == 'error')
+        self.assertEqual(inspector.snapshot()['error_code'], 'embedded_source_error')
+        self.assertNotIn('YouTube просит подтвердить сеанс', inspector.snapshot()['error'])
+        inspector.start('https://www.youtube.com/watch?v=fixture', source_kind='page')
+        wait_for(lambda: inspector.snapshot()['status'] == 'error')
+        self.assertEqual(inspector.snapshot()['error_code'], 'authentication_required')
+
+    def test_supplied_hls_fallback_is_used_after_an_embedded_extractor_auth_failure(self):
+        def inspect(url, options, cancel):
+            if url == 'https://anime.test/episode':
+                raise RuntimeError('yt-dlp: ERROR: [youtube] fixture: Sign in to confirm you are not a bot')
+            return normalize(INFO)
+        inspector = self.inspector(inspect)
+        inspector.start('https://anime.test/episode', source_kind='page',
+            fallbacks=[{'url': 'https://cdn.test/master.m3u8?token=whole', 'options': {'source_kind': 'auto', 'stream_kind': 'HLS'}}])
+        wait_for(lambda: inspector.snapshot()['status'] == 'done')
+        self.assertEqual(inspector.snapshot()['url'], 'https://cdn.test/master.m3u8?token=whole')
+
     def test_cancel_batch_does_not_publish_late_candidates_or_fallback_again(self):
         entered = threading.Event()
         def inspect(url, options, cancel):

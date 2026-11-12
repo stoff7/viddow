@@ -29,3 +29,15 @@ export async function pageContext(tabId, { timeoutMs = 3000 } = {}) {
   } catch { return null; }
   finally { clearTimeout(timer); }
 }
+
+// Network ownership comes from the browser navigation epoch, independently of
+// whether page JavaScript/iframes can be inspected. Never invent DOM metadata.
+export function networkPageContext(tab, generation, dom = null, knownHidden = []) {
+  if (!Number.isInteger(tab?.id) || tab.id < 0 || typeof generation !== 'string' || !generation) return null;
+  try { if (!['http:', 'https:'].includes(new URL(tab.url).protocol)) return null; } catch { return null; }
+  const matched = dom?.url === tab.url ? dom : null;
+  return { ...(matched || { documents: [], allDocuments: [], media: [], mediaKeys: [] }),
+    url: tab.url, documentToken: `tab:${tab.id}:${generation}`, tabGeneration: generation,
+    domDocumentToken: matched?.documentToken || null, domAvailable: Boolean(matched),
+    hiddenDocuments: matched?.hiddenDocuments || knownHidden };
+}

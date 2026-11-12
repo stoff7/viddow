@@ -35,7 +35,7 @@ async function waitFor(fn, title, timeout = 45000) {
       let data, type = 'text/html; charset=utf-8';
       if (url.pathname === '/' && url.searchParams.has('manifest')) {
         type = 'application/vnd.apple.mpegurl'; data = '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=921000,RESOLUTION=1280x720,CODECS="avc1.42e01f,mp4a.40.2"\n/high.m3u8?token=high\n';
-      } else if (['/', '/early', '/second'].includes(url.pathname)) {
+      } else if (['/', '/early', '/second', '/embedded-auth'].includes(url.pathname)) {
         data = '<!doctype html><title>Выбранная серия</title><video style="width:320px;height:180px" controls></video><script src="/app.js"></script>';
       } else if (url.pathname === '/app.js') {
         type = 'application/javascript'; data = `window.discover = async () => { await Promise.all(['unknown', 'high'].map(name => fetch('/'+name+'/master.m3u8?token='+name, {headers: {'X-Video':name}}))); document.querySelector('video').poster='/poster.svg'; }; if(location.pathname!='/early') discover();`;
@@ -54,6 +54,29 @@ async function waitFor(fn, title, timeout = 45000) {
     });
     server.listen(0, '127.0.0.1'); await once(server, 'listening'); base = `http://127.0.0.1:${server.address().port}`;
     execFileSync('python3', ['install_native_host.py', '--user-data-dir', profile], { cwd: root });
+    // A local dependency shim reproduces yt-dlp's embedded YouTube auth error
+    // without contacting YouTube or reading personal cookies. Other URLs use
+    // the installed real yt-dlp, including every HLS analysis and download.
+    const quote = value => "'" + value.replaceAll("'", "'\\''") + "'";
+    const realYtdlp = execFileSync('which', ['yt-dlp'], { encoding: 'utf8' }).trim();
+    const realPython = execFileSync('which', ['python3'], { encoding: 'utf8' }).trim();
+    const bin = path.join(temp, 'bin'); fs.mkdirSync(bin);
+    fs.writeFileSync(path.join(bin, 'yt-dlp'), `#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = ${quote(base + '/embedded-auth')} ]; then
+    printf '%s\n' 'ERROR: [youtube] fixture: Sign in to confirm you are not a bot' >&2
+    exit 1
+  fi
+done
+exec ${quote(realYtdlp)} "$@"
+`, { mode: 0o755 });
+    const nativeWrapper = path.join(temp, 'native-with-fixture.sh');
+    fs.writeFileSync(nativeWrapper, `#!/bin/sh
+export PATH=${quote(bin + ':/opt/homebrew/bin:/usr/local/bin:' + process.env.PATH)}
+exec ${quote(realPython)} ${quote(path.join(root, 'native_host.py'))} "$@"
+`, { mode: 0o755 });
+    const nativeManifest = path.join(profile, 'NativeMessagingHosts/local.video_downloader.json');
+    fs.writeFileSync(nativeManifest, JSON.stringify({ ...JSON.parse(fs.readFileSync(nativeManifest)), path: nativeWrapper }));
     context = await chromium.launchPersistentContext(profile, { headless: false, viewport: null,
       ...(process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {}),
       args: ['--no-proxy-server', `--disable-extensions-except=${extensionPath}`, `--load-extension=${extensionPath}`] });
@@ -147,6 +170,24 @@ async function waitFor(fn, title, timeout = 45000) {
     await panel.waitForFunction(() => !document.querySelector('#inspectLink').disabled);
     const log = await worker.evaluate(async () => (await chrome.storage.session.get('diagnosticLog')).diagnosticLog);
     assert.ok(log.some(row => row.event === 'page_context_unavailable' && row.elapsed_ms >= 2800), 'context timeout must be visible without URLs in diagnostics');
+    // Exact regression: DOM inspection never answers, generic page extraction
+    // chooses an unavailable YouTube embed, but the browser has usable HLS.
+    await worker.evaluate(() => {
+      const original = chrome.scripting.executeScript;
+      globalThis.__restoreFixtureScripting = () => { chrome.scripting.executeScript = original; };
+      chrome.scripting.executeScript = () => new Promise(() => {});
+    });
+    await source.goto(base + '/embedded-auth');
+    await panel.locator('[data-view=streams]').click();
+    await panel.locator('#closeAnalysis').click();
+    const beforeEmbedded = (await state()).jobs.length;
+    await panel.locator('#inspectPage').click();
+    await waitFor(async () => (await state()).jobs.length === beforeEmbedded + 1 && (await state()).jobs.at(-1).status === 'done', 'Embedded YouTube error + unavailable DOM did not recover to HLS');
+    assert.match((await state()).jobs.at(-1).url, /\/high\/master.m3u8/);
+    await worker.evaluate(() => globalThis.__restoreFixtureScripting());
+    const embeddedTrace = fs.readFileSync(process.env.VIDDOW_TRACE_FILE, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line));
+    assert.ok(embeddedTrace.some(row => row.event === 'candidate_error' && row.code === 'embedded_source_error'));
+    assert.ok(embeddedTrace.some(row => row.event === 'page_context_unavailable' && row.code === 'current_generation'));
     // Three failures of one logical attempt render one history card.
     const firstFailure = await panel.evaluate(async url => chrome.runtime.sendMessage({ type: 'download',
       item: { url }, title: 'Одна попытка', page: '' }), base + '/missing.mp4');
@@ -175,7 +216,7 @@ async function waitFor(fn, title, timeout = 45000) {
     assert.equal(attemptLog.filter(row => row.event === 'job_error' && row.attempt_tag === failedJobs[0].attempt_id).length, 3);
     assert.deepEqual(errors, []);
     fs.copyFileSync(process.env.VIDDOW_TRACE_FILE, path.join(artifacts, 'trace.jsonl'));
-    console.log('PASS real automatic fallback: two candidates, 720p+sound recommendation, GIF, two panels, exact-source download, alternative choice, early one-click intent, stalled DOM bridge deadline, fresh unbound root manifest, redacted file logs');
+    console.log('PASS real automatic fallback: two candidates, 720p+sound recommendation, GIF, two panels, exact-source download, alternative choice, early one-click intent, stalled DOM bridge deadline, fresh unbound root manifest, embedded YouTube auth + unavailable DOM recovery, redacted file logs');
     console.log('Artifacts: ' + artifacts);
   } finally {
     await context?.close(); if (server) await new Promise(resolve => server.close(resolve)); fs.rmSync(temp, { recursive: true, force: true });

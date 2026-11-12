@@ -133,3 +133,27 @@ test('a rejected existing source is not reported as an absent video', async () =
   assert.equal(f.calls.length, 0);
   f.preparation.cancel();
 });
+
+test('an embedded YouTube error with unavailable DOM still reaches HLS analysis and the pending download', async () => {
+  const f = fixture();
+  f.state = { session: 'session', analysis: { id: 'page', status: 'error', error_code: 'embedded_source_error' } };
+  f.context = { url: 'https://page.test/', documentToken: 'doc', domAvailable: false, documents: [], media: [], mediaKeys: [], tabGeneration: 'current' };
+  f.items = [{ ...stream('https://cdn.test/manifest?token=whole'), documentId: undefined, frameId: -1, tabGeneration: 'current' }];
+  await f.begin(true); await settle(f.preparation);
+  await new Promise(resolve => setTimeout(resolve, 380)); await settle(f.preparation);
+  assert.equal(f.calls.filter(([name]) => name === 'inspect').length, 1);
+  f.state = { session: 'session', analysis: { id: 'fallback', status: 'done', result: { source_id: 'video', recommended_format_ids: ['720'] } } };
+  f.preparation.observe(); await settle(f.preparation);
+  assert.equal(f.calls.filter(([name]) => name === 'download').length, 1);
+});
+
+test('temporary DOM loss does not invalidate a media key while the browser epoch remains current', async () => {
+  const f = fixture();
+  f.state = { session: 'session', analysis: { id: 'page', status: 'running' } };
+  await f.begin(true); await settle(f.preparation);
+  f.preparation.current.mediaKeys = ['known-media'];
+  f.context = { url: 'https://page.test/', documentToken: 'doc', domAvailable: false, documents: [], mediaKeys: [] };
+  f.state = { session: 'session', analysis: { id: 'page', status: 'done', result: { source_id: 'video', recommended_format_ids: ['720'] } } };
+  f.preparation.observe(); await settle(f.preparation);
+  assert.equal(f.calls.filter(([name]) => name === 'download').length, 1);
+});

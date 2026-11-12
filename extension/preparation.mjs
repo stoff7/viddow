@@ -1,3 +1,4 @@
+import { canRecoverPageError } from './source-policy.mjs';
 import { streamKey } from './stream-model.mjs';
 
 // One shared preparation per native inspector. No panel owns the fallback chain.
@@ -54,7 +55,7 @@ export class VideoPreparation {
     const context = await this.io.context(current.tabId);
     if (!current.active || this.current !== current) return;
     if (!context || context.url !== current.page || context.documentToken !== current.documentToken
-        || current.mediaKeys?.some(key => !(context.mediaKeys?.includes(key) || context.media?.some(media => media.key === key)))) {
+        || context.domAvailable !== false && current.mediaKeys?.some(key => !(context.mediaKeys?.includes(key) || context.media?.some(media => media.key === key)))) {
       this.cancel(); await this.publish(); return;
     }
     if (analysis.status === 'done') {
@@ -74,7 +75,7 @@ export class VideoPreparation {
       }
       await this.publish(); return;
     }
-    if (analysis.status !== 'error' || analysis.error_code !== 'unsupported_source' || current.fallbackStarted) {
+    if (!canRecoverPageError(current.page, analysis) || current.fallbackStarted) {
       current.phase = 'error'; current.download = false; await this.publish(); return;
     }
     const visible = new Set(context.documents);

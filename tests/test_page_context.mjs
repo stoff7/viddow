@@ -33,3 +33,18 @@ test('unresponsive iframe probes do not block snapshots; unproved edges stay exc
     assert.equal(calls, 4);
   } finally { globalThis.chrome = previous; globalThis.__viddowReadPreview = reader; }
 });
+
+test('network ownership survives unavailable DOM and subsequent DOM recovery within one browser navigation epoch', async () => {
+  const { networkPageContext } = await import('../extension/page-context.mjs');
+  const tab = { id: 7, url: 'https://anime.test/episode' };
+  const unavailable = networkPageContext(tab, 'generation', null, ['hidden-doc']);
+  const recovered = networkPageContext(tab, 'generation', { url: tab.url, documentToken: 'dom-token', documents: ['visible'], media: [], mediaKeys: [], hiddenDocuments: [] });
+  assert.equal(unavailable.domAvailable, false);
+  assert.deepEqual(unavailable.media, []);
+  assert.deepEqual(unavailable.hiddenDocuments, ['hidden-doc']);
+  assert.equal(recovered.domAvailable, true);
+  assert.equal(recovered.domDocumentToken, 'dom-token');
+  assert.equal(unavailable.documentToken, recovered.documentToken);
+  assert.notEqual(networkPageContext(tab, 'new-navigation').documentToken, unavailable.documentToken);
+  assert.equal(networkPageContext({ id: 7, url: 'chrome://settings/' }, 'generation'), null);
+});

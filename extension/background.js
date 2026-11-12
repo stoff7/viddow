@@ -1,5 +1,5 @@
 import { VideoPreparation } from './preparation.mjs';
-import { pageContext } from './page-context.mjs';
+import { pageContext, networkPageContext } from './page-context.mjs';
 import { rememberStream, groupStreams, storedTabGeneration } from './stream-model.mjs';
 import { decodeHistory, historyFromJobs } from './history-model.mjs';
 import { recordDiagnostic, readDiagnostics, clearDiagnostics, diagnosticCode, setDiagnosticSink } from './diagnostics.mjs';
@@ -57,6 +57,7 @@ chrome.webRequest.onHeadersReceived.addListener((details) => {
 chrome.webRequest.onBeforeRequest.addListener((details) => {
   if (details.tabId < 0) return;
   if (details.type === 'main_frame' || !tabGenerations.has(details.tabId)) {
+    contextEvidence.delete(details.tabId);
     if (preparation.current?.tabId === details.tabId) { preparation.cancel(); preparation.publish(); }
     tabGenerations.set(details.tabId, crypto.randomUUID());
     updateTab(details.tabId, () => []);
@@ -66,6 +67,7 @@ chrome.webRequest.onBeforeRequest.addListener((details) => {
 chrome.webRequest.onCompleted.addListener(details => requestGenerations.delete(details.requestId), { urls: ['<all_urls>'] });
 chrome.tabs.onRemoved.addListener((tabId) => {
   if (preparation.current?.tabId === tabId) { preparation.cancel(); preparation.publish(); }
+  contextEvidence.delete(tabId);
   tabGenerations.delete(tabId);
   chain = chain.then(() => chrome.storage.session.remove(key(tabId))).catch(console.error);
 });
@@ -214,6 +216,7 @@ async function command(message) {
   });
 }
 const forwardedTrace = new Set();
+const contextEvidence = new Map();
 function forwardTrace(entry) {
   if (!port || !session) return;
   const key = JSON.stringify(entry);
@@ -231,9 +234,18 @@ async function tabContext(tabId) {
     if (!tabGenerations.has(tabId)) tabGenerations.set(tabId, storedTabGeneration(stored) || crypto.randomUUID());
   }
   const generation = tabGenerations.get(tabId);
-  const context = await pageContext(tabId);
-  if (!context || generation !== tabGenerations.get(tabId)) return null;
-  return { ...context, tabGeneration: generation };
+  const cached = contextEvidence.get(tabId);
+  const evidence = cached?.generation === generation ? cached : null;
+  let context = null;
+  const probe = !evidence || evidence.retryAfter <= Date.now();
+  if (probe) context = await pageContext(tabId);
+  let tab;
+  try { tab = await chrome.tabs.get(tabId); }
+  catch { return null; } // The tab may close while an iframe probe is pending.
+  if (generation !== tabGenerations.get(tabId)) return null;
+  const hidden = context?.hiddenDocuments || evidence?.hiddenDocuments || [];
+  contextEvidence.set(tabId, { generation, hiddenDocuments: hidden, retryAfter: context ? 0 : probe ? Date.now() + 5000 : evidence.retryAfter });
+  return networkPageContext(tab, generation, context, hidden);
 }
 const preparation = new VideoPreparation({
   state: async () => (await chrome.storage.session.get('nativeState')).nativeState,
@@ -283,7 +295,7 @@ async function handle(message) {
     if (item.source_kind === 'page' && Number.isInteger(message.tabId)) {
       const started = Date.now(); recordDiagnostic('page_context_start');
       context = await tabContext(message.tabId);
-      recordDiagnostic(context ? 'page_context_ready' : 'page_context_unavailable', { elapsed_ms: Date.now() - started });
+      recordDiagnostic(context?.domAvailable ? 'page_context_ready' : 'page_context_unavailable', { elapsed_ms: Date.now() - started, code: context?.domAvailable ? 'visible_document' : context ? 'current_generation' : 'missing_context' });
     }
     if (context && context.url !== item.url) { if (message.automatic) return { skipped: true }; context = null; }
     if (message.downloadAfterPrepare && context && await preparation.requestDownload({ tabId: message.tabId,

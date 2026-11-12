@@ -1,3 +1,4 @@
+import { canRecoverPageError } from './source-policy.mjs';
 import { downloadCards } from './job-cards.mjs';
 import { groupStreams } from './stream-model.mjs';
 import { visibleMedia, selectMedia } from './media-model.mjs';
@@ -274,7 +275,7 @@ function currentPreparation() {
   if (current.analysisId !== state.analysis?.id && !(current.phase === 'recovering' && state.analysis?.page === current.page)) return null;
   return current;
 }
-function recovering() { const current = currentPreparation(); return ['waiting', 'blocked', 'recovering'].includes(current?.phase) || current?.phase === 'page' && state.analysis?.error_code === 'unsupported_source'; }
+function recovering() { const current = currentPreparation(); return ['waiting', 'blocked', 'recovering'].includes(current?.phase) || current?.phase === 'page' && canRecoverPageError(tab?.url, state.analysis); }
 function videoResult() {
   const result = state.analysis?.result;
   return result?.videos?.find(video => video.id === selectedVideoId) || result;

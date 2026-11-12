@@ -23,6 +23,15 @@ MAX_JSON = 8 * 1024 * 1024
 MAX_MANIFEST = 1024 * 1024
 
 
+PAGE_SOURCE_ERRORS = frozenset(('unsupported_source', 'authentication_required', 'embedded_source_error',
+    'access_denied', 'source_unavailable', 'expired_link', 'network', 'network_timeout', 'network_tls',
+    'analysis_timeout', 'download_error'))
+
+
+def can_recover_page_error(url, options, code):
+    return code == 'unsupported_source' or (options.get('source_kind') == 'page' and not is_youtube(url) and code in PAGE_SOURCE_ERRORS)
+
+
 def hls_kind(text):
     lines = text.lstrip("\ufeff").splitlines()
     if not lines or lines[0].strip() != "#EXTM3U":
@@ -195,7 +204,7 @@ class Inspector:
                 try:
                     sources = [self._analyze(url, self._options)]
                 except Exception as error:
-                    if describe_error(error)[0] != 'unsupported_source' or not self._fallbacks:
+                    if not can_recover_page_error(url, self._options, describe_error(error)[0]) or not self._fallbacks:
                         raise
             if not sources:
                 # Each candidate has its own context, timeout and failure. Never merge by title/path.
@@ -236,6 +245,9 @@ class Inspector:
             with self._lock:
                 cancelled = self._cancel.is_set() or isinstance(error, download.Cancelled)
                 code, message = describe_error(error)
+                if code == 'authentication_required' and self._options.get('source_kind') == 'page' and not is_youtube(url) and '[youtube]' in str(error).lower():
+                    code = 'embedded_source_error'
+                    message = 'Не удалось открыть встроенный YouTube-ролик. Проверяем найденное видео на этой странице.'
                 trace_event('analysis_cancelled' if cancelled else 'candidate_error', analysis_tag=self._state['id'], code=code, status='cancelled' if cancelled else 'error')
                 self._state.update(status='cancelled' if cancelled else 'error', error=None if cancelled else message,
                                    error_code=None if cancelled else code, error_detail=None if cancelled else str(error)[:16384])

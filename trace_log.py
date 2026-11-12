@@ -22,7 +22,7 @@ analysis_start candidate_start candidate_done candidate_error analysis_done anal
 preview_done preview_error download_requested download_queued job_start job_done job_error job_cancelled
 process_start process_done process_error'''.split())
 CODES = frozenset('''host_not_found timeout protocol_mismatch connection_lost command_failed unsupported_source
-analysis_timeout network_timeout network_tls network authentication_required browser_session_unavailable drm
+embedded_source_error analysis_timeout network_timeout network_tls network authentication_required browser_session_unavailable drm
 expired_link destination_permission destination_full destination_unavailable access_denied source_unavailable
 rate_limited missing_dependency download_error visible_document current_generation hidden_document stale_generation
 missing_scope explicit_mismatch no_streams excluded_streams missing_context'''.split())
