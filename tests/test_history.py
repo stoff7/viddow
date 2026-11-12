@@ -43,6 +43,15 @@ class HistoryTests(unittest.TestCase):
             self.assertEqual(job['created_at'], 123)
         self.assertEqual(manager.add(['https://example.com/video.mp4']), [14])
 
+    def test_restore_keeps_shared_attempt_ids_but_does_not_guess_for_legacy_rows(self):
+        identity = 'a' * 32
+        manager = self.manager()
+        manager.restore_history([record(1, 'error', attempt_id=identity), record(2, 'error', attempt_id=identity),
+                                 record(3, 'error'), record(4, 'error')])
+        rows = manager.snapshots()
+        self.assertEqual(rows[0]['attempt_id'], rows[1]['attempt_id'])
+        self.assertNotEqual(rows[2]['attempt_id'], rows[3]['attempt_id'])
+
     def test_missing_file_and_clear_preserve_files_and_active_tasks(self):
         with tempfile.TemporaryDirectory() as folder:
             saved = Path(folder, 'saved.mp4'); saved.write_bytes(b'completed')

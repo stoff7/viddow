@@ -29,7 +29,8 @@ function normalize(row, legacy = false) {
   if (!row || typeof row !== 'object' || !Number.isSafeInteger(row.id) || row.id < 1 || !STATUSES.has(row.status)) return null;
   const source = pageReference(row.page ?? (legacy ? row.source_page : null));
   const path = row.status === 'done' && typeof row.path === 'string' && row.path.startsWith('/') && !/[\x00\r\n]/.test(row.path) ? row.path : null;
-  return { id: row.id, name: safeText(row.name ?? (legacy ? row.title : null), 'Видео') || 'Видео',
+  const attempt = typeof row.attempt_id === 'string' && /^[a-f0-9]{32}$/.test(row.attempt_id) ? { attempt_id: row.attempt_id } : {};
+  return { id: row.id, ...attempt, name: safeText(row.name ?? (legacy ? row.title : null), 'Видео') || 'Видео',
     status: row.status, path, page: source.page,
     page_retry: source.retry && (legacy || row.page_retry === true),
     source_origin: safeOrigin(row.source_origin),
@@ -60,7 +61,7 @@ export function historyFromJobs(jobs) {
   const rows = jobs.map(job => {
     const source = pageReference(job.page);
     const http = typeof job.error === 'string' ? /HTTP(?:\s+Error)?[:\s]+([45]\d\d)\b/i.exec(job.error) : null;
-    return { id: job.id, name: job.name || job.path?.split('/').pop() || 'Видео', status: job.status,
+    return { id: job.id, attempt_id: job.attempt_id, name: job.name || job.path?.split('/').pop() || 'Видео', status: job.status,
       page: source.page, page_retry: source.retry && (!job.restored || job.page_retry === true),
       source_origin: safeOrigin(job.source_origin || job.url), path: job.path,
       created_at: job.created_at, format_label: job.format_label,

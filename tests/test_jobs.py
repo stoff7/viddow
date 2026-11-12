@@ -95,6 +95,41 @@ class JobTests(unittest.TestCase):
         manager.clear()
         self.assertEqual(manager.snapshots(), [])
 
+    def test_same_failed_request_and_explicit_retries_share_attempt_identity(self):
+        def fail(*_args, **_kwargs):
+            raise RuntimeError('HTTP 403')
+        manager = self.manager(runner=fail)
+        first = manager.add(['https://cdn.test/?token=one'], headers={'Cookie': 'one'}, format_ids=['720'])[0]
+        wait_for(lambda: manager.snapshots()[-1]['status'] == 'error')
+        second = manager.add(['https://cdn.test/?token=one'], headers={'Cookie': 'one'}, format_ids=['720'])[0]
+        wait_for(lambda: manager.snapshots()[-1]['status'] == 'error')
+        third = manager.retry(second)
+        wait_for(lambda: manager.snapshots()[-1]['status'] == 'error')
+        self.assertEqual(len({row['attempt_id'] for row in manager.snapshots()}), 1)
+        self.assertEqual(len({first, second, third}), 3)
+        identity = manager.snapshots()[0]['attempt_id']
+        for url, headers, formats in [('https://cdn.test/?token=two', {'Cookie': 'one'}, ['720']),
+                                     ('https://cdn.test/?token=one', {'Cookie': 'two'}, ['720']),
+                                     ('https://cdn.test/?token=one', {'Cookie': 'one'}, ['1080'])]:
+            manager.add([url], headers=headers, format_ids=formats)
+            wait_for(lambda: manager.snapshots()[-1]['status'] == 'error')
+            self.assertNotEqual(manager.snapshots()[-1]['attempt_id'], identity)
+
+    def test_repeated_successful_and_parallel_downloads_are_distinct_attempts(self):
+        manager = self.manager(runner=lambda *_args, **_kwargs: '/tmp/done.mp4')
+        manager.add(['https://cdn.test/video'])
+        wait_for(lambda: manager.snapshots()[-1]['status'] == 'done')
+        manager.add(['https://cdn.test/video'])
+        wait_for(lambda: manager.snapshots()[-1]['status'] == 'done')
+        self.assertEqual(len({row['attempt_id'] for row in manager.snapshots()}), 2)
+        entered, release = threading.Event(), threading.Event()
+        def slow(*_args, **_kwargs):
+            entered.set(); release.wait(2); return '/tmp/parallel.mp4'
+        manager.runner = slow
+        manager.add(['https://cdn.test/parallel', 'https://cdn.test/parallel'])
+        self.assertTrue(entered.wait(1)); release.set()
+        self.assertEqual(len({row['attempt_id'] for row in manager.snapshots()[-2:]}), 2)
+
     def test_capacity_is_atomic_and_clear_preserves_active(self):
         def runner(url, cancel, **kwargs):
             cancel.wait(3)

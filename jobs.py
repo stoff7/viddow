@@ -4,6 +4,8 @@ import os
 import threading
 import time
 import urllib.parse
+import uuid
+import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Optional
@@ -35,9 +37,10 @@ class Job:
     created_at: int = field(default_factory=lambda: int(time.time() * 1000))
     error_code: Optional[str] = None
     error_detail: Optional[str] = None
+    attempt_id: str = field(default_factory=lambda: uuid.uuid4().hex)
 
     def snapshot(self):
-        return {"id": self.id, "url": self.url, "name": self.options.get("name"),
+        return {"id": self.id, "attempt_id": self.attempt_id, "url": self.url, "name": self.options.get("name"),
                 "status": self.status, "fraction": self.fraction, "label": self.label,
                 "error_code": self.error_code, "error_detail": self.error_detail,
                 "path": self.path, "error": self.error,
@@ -97,10 +100,12 @@ class JobManager:
                     "http_status": code, "source_origin": origin}, status=status, path=path if status == "done" else None,
                     error=error if status == "error" else None, restored=True,
                     created_at=row.get("created_at", 0), fraction=1 if status == "done" else None)
+                if isinstance(row.get("attempt_id"), str) and re.fullmatch(r"[a-f0-9]{32}", row["attempt_id"]):
+                    job.attempt_id = row["attempt_id"]
                 self._jobs[job.id] = job
             self._ids = itertools.count(max(self._jobs, default=0) + 1)
 
-    def add(self, urls, **options):
+    def add(self, urls, *, _attempt_id=None, **options):
         with self._lock:
             if self._closed:
                 raise Conflict("Сервер останавливается")
@@ -112,6 +117,12 @@ class JobManager:
                 job = Job(next(self._ids), url, {**options, "headers": dict(options.get("headers") or {})})
                 if options.get("format_ids"):
                     job.options["format_ids"] = list(options["format_ids"])
+                previous = next((row for row in reversed(list(self._jobs.values()))
+                    if not row.restored and row.url == url and row.options == job.options), None)
+                if _attempt_id:
+                    job.attempt_id = _attempt_id
+                elif previous and previous.status == 'error':
+                    job.attempt_id = previous.attempt_id
                 self._jobs[job.id] = job
                 self._executor.submit(self._run, job)
                 ids.append(job.id)
@@ -140,7 +151,7 @@ class JobManager:
             options = {**job.options}
             if cookie_browser is not None:
                 options["cookie_browser"] = cookie_browser
-            return self.add([job.url], **options)[0]
+            return self.add([job.url], _attempt_id=job.attempt_id, **options)[0]
 
     def clear(self):
         with self._lock:
@@ -161,7 +172,7 @@ class JobManager:
             if job.cancel.is_set():
                 return
             job.status, job.label = "running", "Подготовка…"
-            trace_event("job_start", job_id=job.id, status="running")
+            trace_event("job_start", job_id=job.id, attempt_tag=job.attempt_id, status="running")
 
         def progress(fraction, label):
             download.check_cancel(job.cancel)
@@ -184,16 +195,16 @@ class JobManager:
             with self._lock:
                 # Возвращённый путь означает готовый файл, даже если отмена пришла на финише.
                 job.path, job.status, job.fraction, job.label = path, "done", 1, "Сохранено"
-                trace_event("job_done", job_id=job.id, status="done")
+                trace_event("job_done", job_id=job.id, attempt_tag=job.attempt_id, status="done")
         except Exception as error:
             with self._lock:
                 if isinstance(error, download.Cancelled) or job.cancel.is_set():
                     job.status, job.label, job.error = "cancelled", "Отменено", None
-                    trace_event("job_cancelled", job_id=job.id, status="cancelled")
+                    trace_event("job_cancelled", job_id=job.id, attempt_tag=job.attempt_id, status="cancelled")
                 else:
                     job.status, job.label = "error", "Не удалось скачать"
                     job.error_code, job.error = describe_error(error)
-                    trace_event("job_error", job_id=job.id, status="error", code=job.error_code)
+                    trace_event("job_error", job_id=job.id, attempt_tag=job.attempt_id, status="error", code=job.error_code)
                     job.error_detail = str(error)[:16384]
 
     def close(self):

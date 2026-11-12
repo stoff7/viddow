@@ -140,3 +140,6 @@ body>.diagnostics { margin:0 16px 16px; }
 .player-image-missing { display:grid; place-items:center; min-height:72px; font-size:12px; opacity:.7; }
 
 .stream-thumbnail { width:100%; max-height:120px; object-fit:contain; border-radius:6px; margin-bottom:8px; }
+.job-attempts { overflow-wrap:anywhere; }
+.job-attempts ol { padding-left:18px; margin:10px 0; }
+.job-attempts code { display:block; max-height:140px; overflow:auto; }

@@ -65,3 +65,12 @@ test('progress does not change persistent JSON and header-like metadata cannot e
     assert.equal(JSON.stringify(historyFromJobs([{ ...job, name, format_label: name }])).includes('secret-value'), false);
   }
 });
+
+test('attempt identity survives persistent and offline projections without preserving request context', () => {
+  const attempt = 'a'.repeat(32);
+  const history = historyFromJobs([{ ...job, status: 'error', attempt_id: attempt }, { ...job, id: 8, attempt_id: attempt }]);
+  assert.deepEqual(offlineJobs(decodeHistory(history).history).map(row => row.attempt_id), [attempt, attempt]);
+  const invalid = historyFromJobs([{ ...job, attempt_id: 'https://cdn.test/?token=secret' }]);
+  assert.equal(invalid.jobs[0].attempt_id, undefined);
+  assert.equal(JSON.stringify(invalid).includes('secret'), false);
+});

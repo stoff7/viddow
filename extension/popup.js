@@ -1,3 +1,4 @@
+import { downloadCards } from './job-cards.mjs';
 import { groupStreams } from './stream-model.mjs';
 import { visibleMedia, selectMedia } from './media-model.mjs';
 import { formatLabel, mainFormats, choiceProblem, durationLabel, qualityLabel, audioLabel, defaultChoice } from './format-model.mjs';
@@ -526,8 +527,10 @@ function makeJob(job) {
   const bar = el('div', 'bar'), fill = el('span'); bar.append(fill);
   bar.setAttribute('role', 'progressbar'); bar.setAttribute('aria-valuemin', '0'); bar.setAttribute('aria-valuemax', '100');
   const actions = el('div', 'job-actions');
-  root.append(title, source, format, status, bar, label, diagnostic, actions);
-  return { root, title, source, format, status, label, diagnostic, detail, bar, fill, actions, actionKey: '' };
+  const attempts = el('details', 'explanation job-attempts'), attemptSummary = el('summary'), attemptList = el('ol');
+  attempts.append(attemptSummary, attemptList); attempts.hidden = true;
+  root.append(title, source, format, status, bar, label, diagnostic, attempts, actions);
+  return { root, title, source, format, status, label, diagnostic, detail, bar, fill, actions, attempts, attemptSummary, attemptList, attemptKey: '', actionKey: '' };
 }
 function action(text, callback) {
   const button = el('button', 'text-button', text);
@@ -539,7 +542,7 @@ function action(text, callback) {
   return button;
 }
 function renderJobs() {
-  const jobs = state.jobs;
+  const jobs = downloadCards(state.jobs);
   $('jobCount').textContent = jobs.length;
   const running = jobs.filter((job) => ['running', 'cancelling'].includes(job.status)).length;
   const queued = jobs.filter((job) => job.status === 'queued').length;
@@ -567,6 +570,21 @@ function renderJobs() {
       ? job.page_retry ? 'Для повтора получим свежие форматы со страницы. Загрузку нужно подтвердить.' : 'Ссылка загрузки не сохранена. Для повтора вставьте свежую ссылку.' : '');
     card.diagnostic.hidden = !job.error_detail || job.error_detail === job.error;
     card.detail.textContent = job.error_detail || '';
+    card.attempts.hidden = !job.attempt_errors.length;
+    card.attemptSummary.textContent = `Ошибки попытки · ${job.attempt_errors.length}`;
+    const attemptKey = `${state.session}:${job.attempt_errors.map(row => row.id).join(',')}`;
+    const renderAttemptErrors = () => {
+      if (!card.attempts.open || card.attemptKey === attemptKey) return;
+      card.attemptList.replaceChildren(...job.attempt_errors.map(row => {
+        const item = el('li');
+        item.append(el('p', '', `${row.created_at ? new Date(row.created_at).toLocaleString('ru') : `Задание ${row.id}`} · ${row.error || 'Не удалось скачать'}`));
+        if (row.error_detail && row.error_detail !== row.error) item.append(el('code', '', row.error_detail));
+        return item;
+      }));
+      card.attemptKey = attemptKey;
+    };
+    card.attempts.ontoggle = renderAttemptErrors;
+    renderAttemptErrors();
     card.bar.hidden = !['running', 'cancelling'].includes(job.status);
     card.bar.classList.toggle('indeterminate', percent === null);
     card.bar.setAttribute('aria-label', `Скачивание ${card.title.textContent}`);

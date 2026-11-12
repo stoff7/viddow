@@ -147,6 +147,32 @@ async function waitFor(fn, title, timeout = 45000) {
     await panel.waitForFunction(() => !document.querySelector('#inspectLink').disabled);
     const log = await worker.evaluate(async () => (await chrome.storage.session.get('diagnosticLog')).diagnosticLog);
     assert.ok(log.some(row => row.event === 'page_context_unavailable' && row.elapsed_ms >= 2800), 'context timeout must be visible without URLs in diagnostics');
+    // Three failures of one logical attempt render one history card.
+    const firstFailure = await panel.evaluate(async url => chrome.runtime.sendMessage({ type: 'download',
+      item: { url }, title: 'Одна попытка', page: '' }), base + '/missing.mp4');
+    assert.equal(firstFailure.ok, true);
+    await waitFor(async () => (await state()).jobs.at(-1).status === 'error', 'First failed job');
+    const secondFailure = await panel.evaluate(async url => chrome.runtime.sendMessage({ type: 'download',
+      item: { url }, title: 'Одна попытка', page: '' }), base + '/missing.mp4');
+    assert.equal(secondFailure.ok, true);
+    await waitFor(async () => (await state()).jobs.at(-1).status === 'error', 'Second failed job');
+    await panel.evaluate(async id => {
+      const current = (await chrome.storage.session.get('nativeState')).nativeState;
+      return chrome.runtime.sendMessage({ type: 'retry', id, session: current.session });
+    }, secondFailure.result.ids[0]);
+    await waitFor(async () => (await state()).jobs.filter(job => job.status === 'error').length === 3, 'Retried failed job');
+    const failedJobs = (await state()).jobs.filter(job => job.status === 'error');
+    assert.equal(new Set(failedJobs.map(job => job.attempt_id)).size, 1);
+    await panel.locator('[data-view=jobs]').click();
+    await panel.waitForFunction(() => document.querySelectorAll('.job.error').length === 1 && document.querySelector('.job.error .job-attempts summary')?.textContent.endsWith('3'));
+    const failedCard = panel.locator('.job.error');
+    await failedCard.locator('.job-attempts summary').click();
+    await panel.waitForFunction(() => document.querySelectorAll('.job.error .job-attempts[open] li').length === 3);
+    assert.equal(await failedCard.locator('.job-attempts li').count(), 3);
+    assert.equal(await panel.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    await panel.screenshot({ path: path.join(artifacts, 'one-attempt-errors.png'), fullPage: true });
+    const attemptLog = fs.readFileSync(process.env.VIDDOW_TRACE_FILE, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line));
+    assert.equal(attemptLog.filter(row => row.event === 'job_error' && row.attempt_tag === failedJobs[0].attempt_id).length, 3);
     assert.deepEqual(errors, []);
     fs.copyFileSync(process.env.VIDDOW_TRACE_FILE, path.join(artifacts, 'trace.jsonl'));
     console.log('PASS real automatic fallback: two candidates, 720p+sound recommendation, GIF, two panels, exact-source download, alternative choice, early one-click intent, stalled DOM bridge deadline, fresh unbound root manifest, redacted file logs');

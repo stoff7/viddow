@@ -28,7 +28,7 @@ rate_limited missing_dependency download_error visible_document current_generati
 missing_scope explicit_mismatch no_streams excluded_streams missing_context'''.split())
 COUNTS = frozenset('''elapsed_ms candidates_count eligible_count visible_count hidden_count unbound_count
 rejected_count formats_count bytes_count jobs_count job_id tab_id source_index line column'''.split())
-IDS = frozenset(('analysis_tag', 'source_tag', 'candidate_tag', 'document_tag'))
+IDS = frozenset(('analysis_tag', 'source_tag', 'candidate_tag', 'document_tag', 'attempt_tag'))
 ENUMS = {
     'command': frozenset('inspect preview inspect_cancel inspect_history download cancel retry clear configure reveal'.split()),
     'status': frozenset('running cancelling cancelled done error cleared page waiting blocked recovering choose downloaded'.split()),
