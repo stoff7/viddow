@@ -117,8 +117,11 @@ const alive = pid => { try { process.kill(pid, 0); return true; } catch (error) 
     const initialSession = (await state()).session;
     const add = async (url, current = panel) => {
       await current.locator('[data-view=streams]').click();
+      await current.locator('#manualEntry').evaluate(node => { node.open = true; });
       await current.locator('#manualUrl').fill(url); await current.locator('#manualUrl').press('Enter');
-      await current.locator('#jobsView').waitFor();
+      await current.locator('#currentDownload').waitFor();
+      assert.equal(await current.locator('#streamsView').isVisible(), true);
+      await current.locator('[data-view=jobs]').click();
     };
     await add(base + '/video.mp4');
     await panel.locator('.job.done').waitFor();
@@ -144,7 +147,9 @@ const alive = pid => { try { process.kill(pid, 0); return true; } catch (error) 
     }
 
     // Настоящий yt-dlp: явная команда страницы, поддерживаемая generic extractor.
-    await panel.locator('[data-view=streams]').click(); await panel.locator('#page').click();
+    await panel.locator('[data-view=streams]').click();
+    await panel.locator('#pageAlternative').evaluate(node => { node.open = true; });
+    await panel.locator('#page').click();
     await waitUntil(async () => (await state()).jobs.length === 2 && (await state()).jobs[1].status === 'done', 'yt-dlp page: ' + JSON.stringify(await state()));
     assert.deepEqual(fs.readFileSync((await state()).jobs[1].path), video);
 
@@ -157,10 +162,11 @@ const alive = pid => { try { process.kill(pid, 0); return true; } catch (error) 
     await panel.locator('[data-view=streams]').click();
     await panel.waitForFunction(() => document.querySelector('#addressCount').textContent === 'Адресов: 3');
     assert.equal(await panel.locator('.stream-card').count(), 2);
+    await panel.locator('#streamPicker').evaluate(node => { node.open = true; });
     const group = panel.locator('.stream-card').filter({ has: panel.locator('select') });
     await group.locator('summary').click(); await group.locator('select').selectOption(base + urls[0]);
     const before = requests.length;
-    await group.getByRole('button', { name: 'Скачать', exact: true }).click();
+    await group.getByRole('button', { name: 'Скачать без выбора качества', exact: true }).click();
     await waitUntil(async () => (await state()).jobs.length === 3 && ['done', 'error'].includes((await state()).jobs[2].status), 'HLS timeout');
     assert.equal((await state()).jobs[2].status, 'done', JSON.stringify((await state()).jobs[2]));
     assert.ok(requests.slice(before).some(request => request.path === urls[0] && request.headers['x-viddow'] === 'fresh'));
@@ -168,8 +174,8 @@ const alive = pid => { try { process.kill(pid, 0); return true; } catch (error) 
     assert.match(execFileSync('ffprobe', ['-v', 'error', '-show_entries', 'stream=width,height', '-of', 'csv=p=0', hlsPath], { encoding: 'utf8' }), /64,64/);
     console.log('PASS actual yt-dlp page and HLS with selected query and fresh headers');
 
-    // Этап 4: никаких запросов анализа до клика; точное качество + две озвучки.
-    assert.equal((await state()).analysis, null);
+    // Явный выбор другого источника: точное качество + две озвучки.
+    assert.notEqual((await state()).analysis?.url, base + '/quality/master.m3u8');
     assert.equal(requests.some(request => request.path === '/quality/master.m3u8'), false);
     await panel.locator('[data-view=streams]').click();
     await panel.locator('#manualUrl').fill(base + '/quality/master.m3u8');
@@ -336,7 +342,10 @@ const alive = pid => { try { process.kill(pid, 0); return true; } catch (error) 
     // EOF должен остановить не только хост, но и реальный yt-dlp в его группе.
     await other.goto(base + '/slowpage'); await other.bringToFront();
     await panel.waitForFunction(() => document.querySelector('#tabTitle').textContent === 'Локальное видео');
-    await panel.locator('[data-view=streams]').click(); await panel.locator('#page').click();
+    await panel.locator('[data-view=streams]').click();
+    await panel.locator('#pageAlternative').evaluate(node => { node.open = true; });
+    await panel.locator('#page').click();
+    await panel.locator('[data-view=jobs]').click();
     await panel.locator('.job.running').waitFor();
     await waitUntil(() => fs.readdirSync(newOutput).some(file => file.endsWith('.part')), 'No partial file');
     const hostPids = fs.readFileSync(pidsFile, 'utf8').trim().split('\n').map(Number);
@@ -396,6 +405,7 @@ const alive = pid => { try { process.kill(pid, 0); return true; } catch (error) 
     await panel.setViewportSize({ width: 320, height: 900 });
     assert.equal(await panel.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
     await panel.screenshot({ path: path.join(artifacts, 'history-restored-320.png') });
+    await panel.locator('[data-view=jobs]').click();
     await panel.locator('#clear').click();
     await waitUntil(async () => !(await state()).jobs.length, 'History clear');
     assert.equal((await worker.evaluate(() => chrome.storage.local.get('history'))).history.jobs.length, 0);

@@ -1,5 +1,6 @@
 import { rememberStream, groupStreams } from './stream-model.mjs';
 import { decodeHistory, historyFromJobs } from './history-model.mjs';
+import { recordDiagnostic, readDiagnostics, clearDiagnostics, diagnosticCode } from './diagnostics.mjs';
 
 const HOST = 'local.video_downloader';
 const STREAM_TYPE = /mpegurl|dash\+xml/i;
@@ -53,6 +54,9 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 
 // Один хост хранит очередь всех вкладок. Он живёт независимо от открытого UI.
 let port = null, connecting = null, session = null;
+let autoInspectPending = false;
+const automaticSources = new Set();
+let lastAnalysis = '';
 let historyWritable = true, lastHistory = '', historyWarning = '';
 const pending = new Map();
 async function persistHistory(state) {
@@ -79,6 +83,7 @@ async function ensureHost() {
   if (connecting) return connecting;
   if (port && session) return;
   connecting = (async () => {
+    recordDiagnostic('host_connect_start');
     await chain;
     const stored = await chrome.storage.local.get(['settings', 'history']);
     const settings = stored.settings || {};
@@ -92,6 +97,7 @@ async function ensureHost() {
       port = current;
       let ready = false;
       const timeout = setTimeout(() => {
+        recordDiagnostic('host_timeout');
         disconnected('Помощник не ответил. Проверьте его установку.');
         current.disconnect();
       }, 10000);
@@ -102,8 +108,10 @@ async function ensureHost() {
         clearTimeout(timeout);
         if (port === current) { port = null; session = null; }
         const error = hostError(reason);
+        recordDiagnostic('host_disconnect', { code: diagnosticCode(reason) });
         if (!ready) reject(new Error(error));
         for (const [id, request] of pending) {
+          recordDiagnostic('command_error', { command: request.command, code: 'connection_lost', elapsed_ms: Date.now() - request.started });
           clearTimeout(request.timer); request.reject(new Error(error)); pending.delete(id);
         }
         update('host', () => ({ status: 'offline', error }));
@@ -122,17 +130,26 @@ async function ensureHost() {
               current.disconnect();
               return;
             }
+            automaticSources.clear();
             session = message.session;
           } else if (!ready || message.session !== session) return;
           const saved = update('nativeState', () => message, persistHistory);
+          const analysisKey = message.analysis ? `${message.analysis.id}:${message.analysis.status}` : '';
+          if (lastAnalysis !== analysisKey) {
+            lastAnalysis = analysisKey;
+            recordDiagnostic('analysis_state', { status: message.analysis?.status || 'cleared' });
+          }
           update('host', () => ({ status: 'online', error: null }));
           if (message.type === 'ready') {
+            recordDiagnostic('host_ready');
             ready = true; clearTimeout(timeout); saved.then(resolve, reject);
           }
         } else if (message.type === 'reply') {
           const request = pending.get(message.request_id);
           if (!request) return;
           clearTimeout(request.timer); pending.delete(message.request_id);
+          recordDiagnostic(message.ok ? 'command_ok' : 'command_error', { command: request.command,
+            elapsed_ms: Date.now() - request.started, ...(!message.ok ? { code: diagnosticCode(message.error) } : {}) });
           chain.then(() => {
             if (message.ok) request.resolve(message.result);
             else request.reject(new Error(message.error));
@@ -147,6 +164,7 @@ async function ensureHost() {
   })();
   try { return await connecting; }
   catch (error) {
+    recordDiagnostic('host_connect_failed', { code: diagnosticCode(error.message) });
     await update('host', () => ({ status: 'offline', error: hostError(error.message) }));
     throw error;
   }
@@ -156,23 +174,49 @@ async function command(message) {
   await ensureHost();
   if (message.session && message.session !== session) throw new Error('Сессия загрузок изменилась. Добавьте ссылку заново.');
   return new Promise((resolve, reject) => {
+    const started = Date.now();
+    recordDiagnostic('command_start', { command: message.command });
     const request_id = crypto.randomUUID();
     const timer = setTimeout(() => {
       pending.delete(request_id);
+      recordDiagnostic('command_error', { command: message.command, code: 'timeout', elapsed_ms: Date.now() - started });
       reject(new Error('Ответ задерживается. Проверьте список загрузок перед повтором.'));
     }, 12000);
-    pending.set(request_id, { resolve, reject, timer });
+    pending.set(request_id, { resolve, reject, timer, started, command: message.command });
     try { port.postMessage({ ...message, session, request_id }); }
-    catch (error) { clearTimeout(timer); pending.delete(request_id); reject(error); }
+    catch (error) {
+      clearTimeout(timer); pending.delete(request_id);
+      recordDiagnostic('command_error', { command: message.command, code: 'connection_lost', elapsed_ms: Date.now() - started });
+      reject(error);
+    }
   });
 }
 async function handle(message) {
+  if (message.type === 'diagnostic') { await recordDiagnostic(message.event, message.fields); return {}; }
+  if (message.type === 'diagnostics_read') return { version: chrome.runtime.getManifest().version, entries: await readDiagnostics() };
+  if (message.type === 'diagnostics_clear') { await clearDiagnostics(); return {}; }
   if (message.type === 'connect') { await ensureHost(); return {}; }
   if (message.type === 'download' || message.type === 'inspect') {
     const item = message.item;
-    return command({ command: message.type, urls: [item.url], name: message.title || '',
+    const request = { command: message.type, urls: [item.url], name: message.title || '',
       page: message.page || '', referer: item.referer || '', headers: item.headers || {},
-      source_kind: item.source_kind || 'auto', stream_kind: item.kind || null });
+      source_kind: item.source_kind || 'auto', stream_kind: item.kind || null };
+    if (message.type !== 'inspect' || !message.automatic) return command(request);
+    // Panels share one inspector. An automatic request must not replace a newer
+    // source selected in another panel while this request was waiting.
+    if (autoInspectPending) return { skipped: true };
+    autoInspectPending = true;
+    try {
+      await ensureHost();
+      await chain;
+      const latest = (await chrome.storage.session.get('nativeState')).nativeState;
+      const analysis = latest?.analysis;
+      const key = JSON.stringify([session, latest?.settings?.youtube_browser, message.tabId, item.url]);
+      if (message.session !== session || (analysis?.id || null) !== message.expected_analysis_id
+          || ['running', 'cancelling'].includes(analysis?.status) || analysis?.url === item.url || automaticSources.has(key)) return { skipped: true };
+      automaticSources.add(key);
+      return await command({ ...request, session: message.session });
+    } finally { autoInspectPending = false; }
   }
   if (message.type === 'download_selection') {
     return command({ command: 'download', analysis_id: message.analysis_id,
@@ -193,6 +237,7 @@ async function handle(message) {
 }
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
   if (sender.id !== chrome.runtime.id) return;
+  if (message.type === 'page_preview_changed') return;
   handle(message).then((result) => respond({ ok: true, result }), (error) => respond({ ok: false, error: error.message }));
   return true;
 });

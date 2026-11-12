@@ -1,5 +1,5 @@
 import { groupStreams } from './stream-model.mjs';
-import { formatLabel, mainFormats, choiceProblem, durationLabel } from './format-model.mjs';
+import { formatLabel, mainFormats, choiceProblem, durationLabel, qualityLabel, audioLabel, defaultChoice } from './format-model.mjs';
 import { decodeHistory, offlineJobs } from './history-model.mjs';
 
 const $ = (id) => document.getElementById(id);
@@ -10,6 +10,10 @@ const STATUS = { queued: 'В очереди', running: 'Скачиваем', can
 let tab = null, tabKey = '', items = [], state = { jobs: [], settings: {} }, online = false;
 let filter = 'all', settingsDirty = false, refreshRevision = 0, hostRevision = 0;
 let analysisKey = '', dismissedAnalysis = '', inspectPending = false, selectionPending = false;
+let currentDownload = null;
+let previewRevision = 0;
+let pagePreview = null, previewKey = '', autoTimer = null, autoScheduledKey = '';
+const automaticSources = new Set();
 const choices = new Map(), cards = new Map();
 const ownWindow = await chrome.windows.getCurrent();
 
@@ -62,9 +66,11 @@ function controls() {
   $('settingsHint').textContent = active ? 'Настройки можно изменить, когда активные загрузки завершатся или будут отменены.' : '';
   $('clear').disabled = !online || !state.jobs.some((job) => !ACTIVE.has(job.status));
   const analysing = inspectPending || ['running', 'cancelling'].includes(state.analysis?.status);
-  $('inspectPage').hidden = !validUrl(tab?.url);
   $('inspectPage').disabled = !online || analysing || !validUrl(tab?.url);
   $('inspectLink').disabled = !online || analysing;
+  const reason = !online ? 'Подключите локальный помощник, чтобы продолжить.' : analysing ? 'Идёт подготовка. Дождитесь результата или отмените её.' : '';
+  $('prepareHint').textContent = reason || (validUrl(tab?.url) ? 'Когда появится видео, подготовим качество и звук автоматически.' : 'Откройте страницу с видео в этой вкладке.');
+  $('linkHint').textContent = reason;
   $('cancelAnalysis').disabled = !online || state.analysis?.status !== 'running';
   updateFormatChoice();
 }
@@ -78,20 +84,97 @@ async function refreshTab() {
   $('tabTitle').textContent = tab?.title || 'Откройте страницу с видео';
   $('tabHost').textContent = hostOf(tab?.url);
   $('page').hidden = !validUrl(tab?.url);
-  controls(); renderStreams();
+  renderAnalysis(); controls(); renderStreams();
+  refreshPreview();
 }
+function clearPreview() {
+  $('pageThumbnail').hidden = true;
+  $('pageThumbnail').removeAttribute('src');
+  $('pageFacts').hidden = true;
+  $('pageFacts').textContent = '';
+}
+async function refreshPreview() {
+  const revision = ++previewRevision, current = tab;
+  const key = `${current?.id}:${current?.url}`;
+  if (key !== previewKey) { previewKey = key; pagePreview = null; clearPreview(); }
+  if (!validUrl(current?.url) || $('currentPage').hidden) return;
+  try {
+    const frames = await chrome.scripting.executeScript({ target: { tabId: current.id, allFrames: true }, files: ['page-preview.js'] });
+    if (revision !== previewRevision || current.id !== tab?.id || current.url !== tab?.url) return;
+    const page = frames.find(frame => frame.frameId === 0)?.result;
+    if (page?.url !== current.url) return;
+    pagePreview = { ...page, hasPlayer: frames.some(frame => frame.result?.hasPlayer) };
+    const players = frames.filter(frame => frame.result?.hasPlayer);
+    // Several players may be unrelated videos/ads. Do not combine their data.
+    const preview = players.length === 1 ? players[0].result : { ...page, duration: null, isLive: false };
+    if (!players.length) Object.assign(preview, page);
+    if (!preview.poster) { $('pageThumbnail').hidden = true; $('pageThumbnail').removeAttribute('src'); }
+    if (preview.poster) {
+      $('pageThumbnail').src = preview.poster;
+      $('pageThumbnail').alt = preview.posterSource === 'player' ? 'Превью из плеера' : 'Изображение со страницы';
+      $('pageThumbnail').hidden = false;
+    }
+    const facts = [];
+    if (preview.isLive) facts.push('Прямой эфир по данным плеера');
+    else if (preview.duration != null) facts.push(`${durationLabel({ duration: preview.duration })} · ${preview.durationSource === 'player' ? 'По данным плеера' : 'По данным страницы'}`);
+    if (preview.poster && preview.posterSource === 'page') facts.push('Изображение со страницы');
+    $('pageFacts').textContent = facts.join(' · ');
+    $('pageFacts').hidden = !facts.length;
+    maybeAutoInspect();
+  } catch { /* Restricted/closed tabs can still use preparation and manual links. */ }
+}
+$('pageThumbnail').onerror = () => { $('pageThumbnail').hidden = true; };
+chrome.runtime.onMessage.addListener((message, sender) => {
+  if (message.type === 'page_preview_changed' && sender.tab?.id === tab?.id && !$('currentPage').hidden) refreshPreview();
+});
+function automaticSource() {
+  if (!online || !state.session || !validUrl(tab?.url) || $('currentPage').hidden || inspectPending || selectionPending
+      || ['running', 'cancelling'].includes(state.analysis?.status)) return '';
+  if (!items.length && !(pagePreview?.hasPlayer || pagePreview?.hasVideoMetadata)) return '';
+  const key = JSON.stringify([state.session, state.settings.youtube_browser, tab.id, tab.url]);
+  return automaticSources.has(key) ? '' : key;
+}
+function maybeAutoInspect() {
+  const key = automaticSource();
+  if (key === autoScheduledKey) return;
+  clearTimeout(autoTimer); autoScheduledKey = key;
+  if (!key) return;
+  autoTimer = setTimeout(() => {
+    autoScheduledKey = '';
+    if (automaticSource() !== key) return;
+    automaticSources.add(key);
+    inspect({ url: tab.url, source_kind: 'page' }, tab.title, tab.url, true);
+  }, 600);
+}
+function added(result) {
+  currentDownload = { session: state.session, id: result.ids?.[0] };
+  notice('Добавлено в очередь.');
+  renderCurrentDownload();
+}
+function renderCurrentDownload() {
+  const job = currentDownload && currentDownload.session === state.session && state.jobs.find(job => job.id === currentDownload.id);
+  $('currentDownload').hidden = !job;
+  if (!job) return;
+  $('currentDownloadTitle').textContent = job.name || filenameOf(job.url) || 'Загрузка';
+  $('currentDownloadStatus').textContent = [STATUS[job.status], job.error || job.label].filter(Boolean).join(' · ');
+  $('currentDownloadProgress').hidden = !ACTIVE.has(job.status);
+  if (job.fraction == null) $('currentDownloadProgress').removeAttribute('value');
+  else $('currentDownloadProgress').value = Math.max(0, Math.min(1, job.fraction));
+}
+$('openJobs').onclick = () => view('jobs');
 async function start(item, title = '', page = '') {
-  await send({ type: 'download', item, title, page });
-  notice('Добавлено в очередь. Скачивание продолжится, если закрыть панель.');
-  view('jobs');
+  added(await send({ type: 'download', item, title, page }));
 }
-async function inspect(item, title = '', page = '') {
+async function inspect(item, title = '', page = '', automatic = false) {
   inspectPending = true; controls(); notice('');
   try {
-    await send({ type: 'inspect', item, title, page });
-    dismissedAnalysis = ''; view('streams');
+    const result = await send({ type: 'inspect', item, title, page, automatic, tabId: tab?.id,
+      session: state.session, expected_analysis_id: state.analysis?.id || null });
+    if (result.skipped) return;
+    dismissedAnalysis = ''; renderAnalysis();
+    if (!automatic) { view('streams'); $('analysisStatus').focus(); }
   } catch (error) { notice(error.message, true); }
-  finally { inspectPending = false; controls(); }
+  finally { inspectPending = false; controls(); renderStreams(); }
 }
 function selectedFormats() {
   const main = state.analysis?.result?.formats.find(format => format.id === $('videoFormat').value);
@@ -104,42 +187,60 @@ function updateFormatChoice() {
   const problem = choiceProblem(main, audio, state.tools?.ffmpeg, $('silentVideo').checked);
   $('audioChoices').hidden = main?.kind !== 'video';
   $('downloadFormat').disabled = !online || state.analysis?.status !== 'done' || Boolean(problem) || selectionPending;
-  $('formatHint').textContent = problem || (main?.kind === 'combined' ? 'Звук уже встроен в этот формат.' : main?.kind === 'unknown'
-    ? 'Состав дорожек не указан источником. Скачается выбранный формат.' : $('silentVideo').checked ? 'Будет сохранено видео без звука.' : 'Будут сохранены выбранные дорожки.');
+  $('formatDetails').textContent = main ? [formatLabel(main), ...audio.map(id => formatLabel(state.analysis.result.formats.find(format => format.id === id)))].join('\n') : '';
+  $('formatHint').textContent = !online ? 'Подключите локальный помощник, чтобы скачать выбранное.' : problem || (main?.kind === 'combined' ? 'Звук уже встроен в этот формат.' : main?.kind === 'unknown'
+    ? 'Состав дорожек не указан источником. Скачается выбранный формат.' : $('silentVideo').checked ? 'Будет сохранено видео без звука.' : main?.kind === 'audio' ? 'Будет сохранён только звук.' : 'Будут сохранены выбранные дорожки.');
 }
 function renderAnalysis() {
   const analysis = state.analysis;
-  $('analysisCard').hidden = !analysis || analysis.id === dismissedAnalysis;
-  if (!analysis) { analysisKey = ''; return; }
-  $('analysisSource').textContent = analysis.url;
-  const running = ['running', 'cancelling'].includes(analysis.status);
+  const visible = Boolean(analysis && `${state.session}:${analysis.id}` !== dismissedAnalysis);
+  const running = ['running', 'cancelling'].includes(analysis?.status);
+  const preparingPage = visible && running && analysis.url === tab?.url;
+  $('analysisCard').hidden = !visible;
+  $('analysisIdentity').hidden = preparingPage;
+  $('currentPage').hidden = visible && !preparingPage;
+  $('inspectPage').hidden = preparingPage;
+  $('prepareHint').hidden = preparingPage;
+  $('pageAlternative').hidden = !validUrl(tab?.url) || (visible && analysis.url !== tab?.url);
+  if (!analysis) { analysisKey = ''; $('analysisResult').hidden = true; updateFormatChoice(); return; }
+  const sourceUrl = new URL(analysis.url);
+  $('analysisSource').textContent = sourceUrl.host + decoded(sourceUrl.pathname);
+  $('analysisSource').title = sourceUrl.host + decoded(sourceUrl.pathname);
+  $('analysisUrl').textContent = analysis.url;
+  $('analysisContext').hidden = analysis.url === tab?.url;
   $('cancelAnalysis').hidden = !running;
   $('closeAnalysis').hidden = running;
-  $('analysisStatus').textContent = analysis.status === 'running' ? 'Получаем метаданные… Загрузка ещё не началась.' : analysis.status === 'cancelling'
-    ? 'Останавливаем анализ…' : analysis.status === 'error' ? analysis.error : analysis.status === 'cancelled' ? 'Анализ отменён.' : 'Выберите формат перед скачиванием.';
+  $('analysisStatus').textContent = analysis.status === 'running' ? 'Ищем видео и доступные варианты… Скачивание ещё не началось.' : analysis.status === 'cancelling'
+    ? 'Останавливаем подготовку…' : analysis.status === 'error' ? analysis.error : analysis.status === 'cancelled' ? 'Подготовка отменена. Можно вернуться к текущей вкладке и попробовать снова.' : analysis.result?.formats?.length ? 'Проверьте качество и звук перед скачиванием.' : 'Источник не передал варианты. Можно скачать без выбора качества.';
   $('analysisStatus').classList.toggle('error', analysis.status === 'error');
   $('analysisDiagnostic').hidden = !analysis.error_detail || analysis.error_detail === analysis.error;
   $('analysisErrorDetail').textContent = analysis.error_detail || '';
-  $('analysisResult').hidden = analysis.status !== 'done';
-  const key = `${analysis.id}:${analysis.status}`;
+  $('analysisResult').hidden = analysis.status !== 'done' || !analysis.result?.formats?.length;
+  $('analysisFallback').hidden = running || (analysis.status === 'done' && Boolean(analysis.result?.formats?.length));
+  const key = `${state.session}:${analysis.id}:${analysis.status}`;
   if (key !== analysisKey && analysis.status === 'done') {
     const result = analysis.result;
     $('videoTitle').textContent = result.title;
-    const kind = result.hls_kind === 'master' ? 'HLS: главный плейлист' : result.hls_kind === 'media' ? 'HLS: медиа-плейлист' : '';
-    $('videoFacts').textContent = [durationLabel(result), kind].filter(Boolean).join(' · ');
+    $('videoTitle').title = result.title;
+    $('videoFacts').textContent = durationLabel(result);
     $('videoThumbnail').hidden = !result.thumbnail;
     if (result.thumbnail) $('videoThumbnail').src = result.thumbnail;
     else $('videoThumbnail').removeAttribute('src');
     $('videoThumbnail').onerror = () => { $('videoThumbnail').hidden = true; };
-    $('videoFormat').replaceChildren(...mainFormats(result.formats).map(format => {
-      const option = el('option', '', formatLabel(format)); option.value = format.id; return option;
+    const defaults = defaultChoice(result.formats, state.tools?.ffmpeg);
+    const formats = mainFormats(result.formats);
+    const labels = formats.map(qualityLabel);
+    $('videoFormat').replaceChildren(...formats.map((format, index) => {
+      const label = labels[index];
+      const option = el('option', '', labels.filter(value => value === label).length > 1 ? `${label} · ${format.id}` : label);
+      option.value = format.id; option.selected = format.id === defaults.main; return option;
     }));
     $('silentVideo').checked = false;
     $('audioFormats').replaceChildren(...result.formats.filter(format => format.kind === 'audio').map(format => {
       const label = el('label', 'audio-option'), input = el('input');
-      input.type = 'checkbox'; input.value = format.id;
+      input.type = 'checkbox'; input.value = format.id; input.checked = defaults.audio.includes(format.id);
       input.onchange = () => { if (input.checked) $('silentVideo').checked = false; updateFormatChoice(); };
-      label.append(input, el('span', '', formatLabel(format))); return label;
+      label.append(input, el('span', '', `${audioLabel(format)}${result.formats.filter(item => item.kind === 'audio' && audioLabel(item) === audioLabel(format)).length > 1 ? ` · ${format.id}` : ''}`)); return label;
     }));
   }
   analysisKey = key;
@@ -155,7 +256,8 @@ $('cancelAnalysis').onclick = async () => {
   try { await send({ type: 'inspect_cancel', analysis_id: state.analysis.id, session: state.session }); }
   catch (error) { notice(error.message, true); }
 };
-$('closeAnalysis').onclick = () => { dismissedAnalysis = state.analysis.id; renderAnalysis(); };
+$('closeAnalysis').onclick = () => { dismissedAnalysis = `${state.session}:${state.analysis.id}`; renderAnalysis(); refreshPreview(); $('inspectPage').focus(); };
+$('chooseStream').onclick = () => { $('streamPicker').open = true; $('streamPicker').querySelector('summary').focus(); $('streamPicker').scrollIntoView({ block: 'start' }); };
 $('videoFormat').onchange = () => { $('silentVideo').checked = false; updateFormatChoice(); };
 $('silentVideo').onchange = () => {
   if ($('silentVideo').checked) $('audioFormats').querySelectorAll('input').forEach(input => { input.checked = false; });
@@ -168,9 +270,8 @@ $('formatForm').onsubmit = async event => {
   if (problem) { notice(problem, true); return; }
   selectionPending = true; controls();
   try {
-    await send({ type: 'download_selection', analysis_id: state.analysis.id,
-      format_ids: [main.id, ...audio], session: state.session });
-    notice('Выбранный формат добавлен в очередь.'); view('jobs');
+    added(await send({ type: 'download_selection', analysis_id: state.analysis.id,
+      format_ids: [main.id, ...audio], session: state.session }));
   } catch (error) { notice(error.message, true); }
   finally { selectionPending = false; controls(); }
 };
@@ -182,19 +283,21 @@ function renderStreams() {
   const groups = groupStreams(items);
   const open = new Set([...$('streams').querySelectorAll('details[open]')].map((node) => node.dataset.key));
   const focusedUrl = document.activeElement?.dataset?.url;
+  const focusedAction = document.activeElement?.dataset?.action;
   $('streamCount').textContent = groups.length;
+  $('foundCount').textContent = groups.length ? `(${groups.length})` : '';
   $('addressCount').textContent = items.length ? `Адресов: ${items.length}` : '';
   $('streamsEmpty').hidden = Boolean(groups.length);
-  $('streams').replaceChildren(...groups.map((group) => {
+  $('streams').replaceChildren(...groups.map((group, index) => {
     const chosen = choices.get(group.key);
     const item = group.items.find((entry) => entry.url === chosen) || group.items[0];
     const li = el('li', 'stream-card');
     const heading = el('div', 'stream-heading');
-    heading.append(el('span', 'badge', group.kind), el('span', 'stream-name', decoded(group.path.split('/').pop()) || 'Плейлист'));
+    heading.append(el('span', 'stream-name', `Поток ${index + 1}`));
     const path = el('div', 'stream-path', decoded(group.path));
     path.title = decoded(group.path);
-    const button = el('button', 'button primary', 'Скачать');
-    button.dataset.url = item.url;
+    const button = el('button', 'text-button', 'Скачать без выбора качества');
+    button.dataset.url = item.url; button.dataset.action = 'download';
     const active = state.jobs.find((job) => job.url === item.url && ACTIVE.has(job.status));
     button.disabled = !online || Boolean(active);
     if (active) button.textContent = STATUS[active.status];
@@ -204,8 +307,9 @@ function renderStreams() {
       catch (error) { notice(error.message, true); button.disabled = !online; }
     };
     const actions = el('div', 'stream-actions');
-    actions.append(el('span', 'stream-observed', observed(item) ? `Замечен в ${observed(item)}` : 'Обнаружен на вкладке'), button);
-    const analyse = el('button', 'text-button', 'Качество и звук');
+    actions.append(button);
+    const analyse = el('button', 'button wide', 'Подготовить поток');
+    analyse.dataset.url = item.url; analyse.dataset.action = 'inspect';
     analyse.disabled = !online || inspectPending || ['running', 'cancelling'].includes(state.analysis?.status);
     analyse.onclick = () => inspect(item, tab?.title, tab?.url);
     const refresh = el('button', 'text-button', 'Обновить ссылку');
@@ -232,10 +336,13 @@ function renderStreams() {
     const copyButton = el('button', 'text-button', 'Копировать адрес');
     copyButton.onclick = () => copy(item.url).catch(() => notice('Не удалось скопировать. Выделите полный адрес вручную.', true));
     details.append(fullUrl, copyButton);
-    li.append(heading, el('div', 'stream-host', group.host), path, actions, analyse, refresh, details);
+    details.insertBefore(path, details.children[1]);
+    details.insertBefore(el('div', 'stream-observed', [group.kind, observed(item) ? `Замечен в ${observed(item)}` : ''].filter(Boolean).join(' · ')), path);
+    li.append(heading, el('div', 'stream-host', group.host), el('div', 'stream-path', decoded(group.path)), el('p', 'field-note', 'Качество и звук пока неизвестны'), analyse, actions, refresh, details);
     return li;
   }));
-  if (focusedUrl) [...$('streams').querySelectorAll('button[data-url]')].find((button) => button.dataset.url === focusedUrl)?.focus({ preventScroll: true });
+  if (focusedUrl) [...$('streams').querySelectorAll('button[data-url]')].find((button) => button.dataset.url === focusedUrl && button.dataset.action === focusedAction)?.focus({ preventScroll: true });
+  maybeAutoInspect();
 }
 function makeJob(job) {
   const root = el('li', 'job'); root.dataset.id = job.id;
@@ -319,7 +426,7 @@ function renderJobs() {
   });
   $('jobsEmpty').hidden = visible > 0;
   $('jobsEmpty').querySelector('h3').textContent = jobs.length ? 'В этом фильтре пока нет задач' : 'Здесь будут ваши загрузки';
-  controls();
+  renderCurrentDownload(); controls();
 }
 function renderState(next) {
   state = next || { jobs: [], settings: {} };
@@ -332,7 +439,9 @@ function renderState(next) {
   $('folderLabel').textContent = folder.endsWith('/Downloads') ? 'Загрузки' : folder.split('/').filter(Boolean).pop();
   $('folderLabel').title = folder;
   $('toolsStatus').textContent = state.tools ? `yt-dlp: ${state.tools.yt_dlp ? 'найден' : 'не найден'}. ffmpeg: ${state.tools.ffmpeg ? 'найден' : 'не найден'}.` : 'Подключите помощник, чтобы проверить инструменты.';
+  const wasChoosing = $('currentPage').hidden;
   renderAnalysis(); renderJobs(); renderStreams();
+  if (wasChoosing && !$('currentPage').hidden) refreshPreview();
 }
 function renderHost(host) {
   hostRevision++;
@@ -409,3 +518,4 @@ renderState(stored.nativeState || { jobs: offlineJobs(history.history), settings
 renderHistoryStatus(stored.historyStatus || { warning: history.warning });
 await refreshTab();
 await connect();
+globalThis.viddowPanelReady();

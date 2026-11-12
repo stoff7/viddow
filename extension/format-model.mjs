@@ -17,6 +17,27 @@ export function mainFormats(formats) {
     (b.height || 0) - (a.height || 0) || (b.fps || 0) - (a.fps || 0) || (b.tbr || 0) - (a.tbr || 0));
 }
 
+export function qualityLabel(format) {
+  const quality = format.kind === 'audio' ? 'Только звук' : format.height ? `${format.height}p` : 'Качество неизвестно';
+  return [quality, format.fps ? `${format.fps} fps` : '', format.ext,
+    format.kind === 'combined' ? 'со звуком' : format.kind === 'unknown' ? 'звук неизвестен' : ''].filter(Boolean).join(' · ');
+}
+
+export function audioLabel(format) {
+  let language = format.language || 'Язык не указан';
+  try { if (format.language) language = new Intl.DisplayNames(['ru'], { type: 'language' }).of(format.language); } catch { /* Keep source language. */ }
+  return [language, format.format_note, format.ext].filter(Boolean).join(' · ');
+}
+
+// A single known audio track is unambiguous; multiple languages require a choice.
+export function defaultChoice(formats, ffmpeg) {
+  const ordered = mainFormats(formats);
+  const audio = formats.filter(format => format.kind === 'audio');
+  const main = ordered.find(format => format.kind === 'combined' || format.kind === 'audio'
+    || (format.kind === 'video' && ffmpeg && audio.length === 1)) || ordered[0];
+  return { main: main?.id || '', audio: main?.kind === 'video' && ffmpeg && audio.length === 1 ? [audio[0].id] : [] };
+}
+
 export function choiceProblem(main, audioIds, ffmpeg, silent = false) {
   if (!main) return 'Выберите формат.';
   if (main.kind === 'video' && !audioIds.length && !silent) return 'Выберите хотя бы одну звуковую дорожку или «Видео без звука».';
