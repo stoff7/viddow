@@ -27,8 +27,10 @@ function update(storageKey, change, afterWrite) {
   return operation;
 }
 function updateTab(tabId, change) {
-  return update(key(tabId), (value) => change(value || []), (items) =>
-    chrome.action.setBadgeText({ tabId, text: items.length ? String(groupStreams(items).length) : '' })).then(items => { preparation.observe(); return items; });
+  return update(key(tabId), (value) => change(value || []), async (items) => {
+    try { await chrome.action.setBadgeText({ tabId, text: items.length ? String(groupStreams(items).length) : '' }); }
+    catch (error) { if (!/No tab with id|tab.*closed/i.test(error?.message || '')) throw error; }
+  }).then(items => { preparation.observe(); return items; });
 }
 chrome.webRequest.onSendHeaders.addListener((details) => {
   if (details.tabId < 0) return;
@@ -252,13 +254,33 @@ async function tabContext(tabId) {
   contextEvidence.set(tabId, { generation, hiddenDocuments: hidden, retryAfter: context ? 0 : probe ? Date.now() + 5000 : evidence.retryAfter });
   return networkPageContext(tab, generation, context, hidden);
 }
+async function bindMediaJobs(result, origin, nativeSession) {
+  if (!origin?.cardKey || !result.ids?.length) return result;
+  await update('mediaJobs', stored => {
+    const next = stored?.session === nativeSession ? { ...stored, jobs: { ...stored.jobs } } : { session: nativeSession, jobs: {} };
+    for (const id of result.ids) next.jobs[id] = { ...origin };
+    return next;
+  });
+  return result;
+}
+async function preparedDownload(request) {
+  const owner = preparation.current;
+  const origin = { tabId: owner.tabId, page: owner.page, tabPage: owner.page, documentToken: owner.documentToken, mediaKey: owner.selectedMediaKey,
+    cardKey: owner.selectedMediaKey || JSON.stringify(['page', owner.tabId, owner.page, owner.documentToken]),
+    title: owner.title || '' };
+  const snapshot = (await chrome.storage.session.get('nativeState')).nativeState;
+  if (!owner.active || preparation.current !== owner || snapshot?.session !== request.session) throw new Error('Подготовка отменена.');
+  if (snapshot?.analysis?.result?.videos?.length > 1 && request.source_id !== snapshot.analysis.result.source_id) origin.cardKey += `:source:${request.source_id}`;
+  const result = await command({ command: 'download', ...request });
+  return bindMediaJobs(result, origin, request.session);
+}
 const preparation = new VideoPreparation({
   state: async () => (await chrome.storage.session.get('nativeState')).nativeState,
   context: tabContext,
   trace: recordDiagnostic,
   streams: async tabId => (await chrome.storage.session.get(key(tabId)))[key(tabId)] || [],
   inspect: request => command({ command: 'inspect', ...request }),
-  download: request => command({ command: 'download', ...request }),
+  download: preparedDownload,
   cancel: (analysis_id, session) => command({ command: 'inspect_cancel', analysis_id, session }),
   publish: value => chrome.storage.session.set({ preparation: value }),
   downloaded: (current, result) => chrome.storage.session.set({ smartDownload: {
@@ -272,6 +294,11 @@ async function startInspection(request, message, context, selectionRevision) {
   preparation.cancel(); await preparation.publish();
   const result = await command(request);
   if (selectionChanged()) return { ...result, skipped: true };
+  await chrome.storage.session.set({ analysisOrigin: { session, analysisId: result.analysis_id,
+    tabId: message.tabId, page: message.page || message.item.url, tabPage: message.tabPage, url: message.item.url, sourceKind: message.item.source_kind || 'auto',
+    mediaKey: message.selectedMediaKey || null,
+    cardKey: message.selectedMediaKey || JSON.stringify(['page', message.tabId, message.item.url, context?.documentToken || '']),
+    title: message.title || '' } });
   if (message.item.source_kind === 'page' && context) {
     await preparation.begin({ tabId: message.tabId, page: message.item.url,
       documentToken: context.documentToken, mediaKeys: message.selectedMediaKey ? [message.selectedMediaKey] : context.mediaKeys, selectedMediaKey: message.selectedMediaKey || null, title: message.title || '', session, analysisId: result.analysis_id, download: Boolean(message.downloadAfterPrepare) });
@@ -289,7 +316,7 @@ async function handle(message) {
     return {};
   }
   if (message.type === 'diagnostic') { await recordDiagnostic(message.event, message.fields); return {}; }
-  if (message.type === 'diagnostics_read') return { version: chrome.runtime.getManifest().version, entries: await readDiagnostics() };
+  if (message.type === 'diagnostics_read') return { version: chrome.runtime?.getManifest?.()?.version || '', entries: await readDiagnostics() };
   if (message.type === 'diagnostics_clear') { await clearDiagnostics(); return {}; }
   if (message.type === 'connect') { await ensureHost(); return {}; }
   if (message.type === 'preview') {
@@ -307,7 +334,10 @@ async function handle(message) {
     const request = { command: message.type, urls: [item.url], name: message.title || '',
       page: message.page || '', referer: item.referer || '', headers: item.headers || {},
       source_kind: item.source_kind || 'auto', stream_kind: item.kind || null };
-    if (message.type !== 'inspect') return command(request);
+    if (message.type !== 'inspect') {
+      const result = await command({ ...request, session: message.session });
+      return bindMediaJobs(result, message.cardOrigin, message.session || session);
+    }
     const selectionRevision = playerSelections.get(message.tabId)?.revision || 0;
     let context = null;
     if (item.source_kind === 'page' && Number.isInteger(message.tabId)) {
@@ -336,8 +366,10 @@ async function handle(message) {
     } finally { autoInspectPending = false; }
   }
   if (message.type === 'download_selection') {
-    return command({ command: 'download', analysis_id: message.analysis_id,
+    const origin = message.cardOrigin;
+    const result = await command({ command: 'download', analysis_id: message.analysis_id,
       format_ids: message.format_ids, source_id: message.source_id, session: message.session });
+    return bindMediaJobs(result, origin, message.session);
   }
   if (message.type === 'inspect_cancel') {
     preparation.cancel(); await preparation.publish();
@@ -345,7 +377,24 @@ async function handle(message) {
   }
   if (['cancel', 'retry', 'clear', 'reveal', 'inspect_history'].includes(message.type)) {
     if (message.type === 'inspect_history') { preparation.cancel(); await preparation.publish(); }
-    return command({ command: message.type, id: message.id, session: message.session });
+    const before = message.type === 'inspect_history' ? (await chrome.storage.session.get('nativeState')).nativeState : null;
+    const result = await command({ command: message.type, id: message.id, session: message.session });
+    if (message.type === 'inspect_history') {
+      const job = before?.jobs?.find(row => row.id === message.id);
+      await chrome.storage.session.set({ analysisOrigin: { session: message.session, analysisId: result.analysis_id,
+        tabId: message.tabId, tabPage: message.tabPage, page: job.page, url: job.page, sourceKind: 'page',
+        cardKey: JSON.stringify(['history', message.session, message.id]), title: job.name || 'Видео' } });
+    }
+    if (message.type === 'clear') {
+      const latest = (await chrome.storage.session.get('nativeState')).nativeState;
+      await update('mediaJobs', stored => !stored || stored.session !== latest?.session ? stored || null : { ...stored,
+        jobs: Object.fromEntries(Object.entries(stored.jobs || {}).filter(([id]) => latest.jobs.some(job => String(job.id) === id))) });
+    }
+    if (message.type === 'retry') {
+      const stored = (await chrome.storage.session.get('mediaJobs')).mediaJobs;
+      if (stored?.session === message.session) await bindMediaJobs({ ids: [result.id] }, stored.jobs?.[message.id], message.session);
+    }
+    return result;
   }
   if (message.type === 'configure') {
     preparation.cancel(); await preparation.publish();
@@ -356,7 +405,8 @@ async function handle(message) {
   throw new Error('Неизвестная команда');
 }
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
-  if (sender.id !== chrome.runtime.id) return;
+  const runtimeId = globalThis.chrome?.runtime?.id;
+  if (!runtimeId || sender?.id !== runtimeId) return;
   if (message.type === 'page_preview_changed') { preparation.observe(); return; }
   handle(message).then((result) => respond({ ok: true, result }), (error) => respond({ ok: false, error: error.message }));
   return true;

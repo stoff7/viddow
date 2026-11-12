@@ -10,63 +10,29 @@
 <script type="module" src="popup.js"></script>
 </head>
 <body>
-<header class="header"><a class="brand" href="#" aria-label="Viddow"><span class="brand-mark">↓</span>viddow<span>.</span></a><button id="theme" class="icon-button" aria-label="Переключить тему" title="Переключить тему">◐</button></header>
-<div class="connection"><span id="hostDot" class="dot"></span><span id="hostStatus" role="status">Подключаем загрузчик…</span><button id="reconnect" class="text-button" hidden>Подключить</button></div>
+<header class="header"><a class="brand" href="#" aria-label="Viddow"><span class="brand-mark">↓</span>viddow<span>.</span></a><div class="connection"><span id="hostDot" class="dot"></span><span id="hostStatus" role="status">Подключаем загрузчик…</span><button id="reconnect" class="text-button" hidden>Подключить</button></div><button id="theme" class="icon-button" aria-label="Переключить тему" title="Переключить тему">◐</button></header>
+
 <div id="hostError" class="notice error" hidden></div>
 <div id="clientError" class="notice error" role="alert" hidden></div>
 <div id="historyStatus" class="notice" role="status" hidden></div>
 <div id="message" class="notice" role="status" hidden></div>
-<nav class="tabs" aria-label="Разделы расширения"><button data-view="streams" aria-pressed="true">На странице <span id="streamCount">0</span></button><button data-view="jobs" aria-pressed="false">Загрузки <span id="jobCount">0</span></button><button data-view="settings" aria-pressed="false">Настройки</button></nav>
+<p id="completionLive" class="visually-hidden" role="status" aria-atomic="true"></p>
 <main>
 <section id="streamsView">
-  <div class="page-card">
-    <div id="currentPage">
-      <div class="eyebrow">ТЕКУЩАЯ СТРАНИЦА</div><h1 id="tabTitle">Открытая страница</h1><p id="tabHost" class="muted"></p>
-      <img id="pageThumbnail" alt="Изображение со страницы" referrerpolicy="no-referrer" hidden>
-      <p id="pageImageMissing" class="player-image-missing" hidden>Кадр и постер недоступны</p>
-      <div id="playerImages" class="player-images" aria-label="Выбор видео по картинке" hidden></div>
-      <select id="playerChoice" aria-label="Плеер для метаданных" hidden></select>
-      <p id="pageFacts" class="muted" hidden></p>
-      <button id="inspectPage" class="button primary wide" aria-describedby="prepareHint">Скачать</button>
-      <p id="prepareHint" class="page-note">Когда появится видео, подготовим качество и звук автоматически.</p>
-    </div>
-    <section id="analysisCard" aria-label="Подготовка скачивания" hidden>
-      <div id="analysisIdentity">
-      <div class="section-heading"><h2>Видео для скачивания</h2><button id="closeAnalysis" class="text-button" type="button">К текущей вкладке</button></div>
-      <details class="source-detail"><summary>Технические подробности видео</summary><p id="analysisSource" class="muted"></p><code id="analysisUrl"></code></details>
-      <p id="analysisContext" class="field-note" hidden>Открыта другая страница. Выбор относится к указанному выше источнику.</p>
-      </div>
-      <p id="analysisStatus" role="status" tabindex="-1"></p>
-      <details id="analysisDiagnostic" class="explanation" hidden><summary>Техническая причина</summary><code id="analysisErrorDetail"></code></details>
-      <button id="cancelAnalysis" class="text-button" type="button" hidden>Отменить подготовку</button>
-      <div id="analysisResult" hidden>
-        <div id="analysisVideos" class="player-images" aria-label="Найденные видео" hidden></div>
-        <label id="videoChoiceLabel" hidden>Видео<select id="videoChoice" aria-label="Видео для скачивания"></select></label>
-        <p id="videoImageMissing" class="player-image-missing" hidden>Готовим превью…</p>
-        <img id="videoThumbnail" alt="Обложка видео" referrerpolicy="no-referrer" hidden>
-        <h3 id="videoTitle"></h3><p id="videoFacts" class="muted"></p>
-        <form id="formatForm">
-          <label for="videoFormat">Качество</label><select id="videoFormat"></select>
-          <fieldset id="audioChoices"><legend>Озвучка</legend><div id="audioFormats"></div><label class="audio-option"><input id="silentVideo" type="checkbox"> Видео без звука</label></fieldset>
-          <details class="source-detail"><summary>Параметры выбранного формата</summary><code id="formatDetails"></code></details>
-          <p id="formatHint" class="field-note" role="status"></p><button id="downloadFormat" class="button primary wide" type="submit" aria-describedby="formatHint">Скачать</button>
-        </form>
-      </div>
-      <div id="analysisFallback" hidden><p class="field-note">Попробуйте найденный поток или скачайте ссылку без выбора качества в дополнительных действиях ниже.</p><button id="chooseStream" class="text-button" type="button">Выбрать найденный поток</button></div>
-    </section>
-    <details id="pageAlternative" class="source-detail"><summary>Скачать без выбора качества</summary><p class="field-note">Загрузчик сам выберет доступный вариант с текущей страницы.</p><button id="page" class="button wide">Скачать текущую страницу</button></details>
-    <div id="currentDownload" class="current-download" hidden><p id="currentDownloadTitle"></p><p id="currentDownloadStatus" role="status"></p><progress id="currentDownloadProgress" max="1" aria-label="Прогресс скачивания"></progress><button id="openJobs" class="text-button" type="button">Открыть загрузки</button></div>
-  </div>
+  <div class="page-heading"><h1 id="tabTitle">Видео на странице</h1><p id="tabHost" class="muted"></p></div>
+  <ul id="mediaList" class="media-list" aria-label="Видео текущей вкладки"></ul>
+  <div id="mediaEmpty" class="empty"><span class="empty-icon" aria-hidden="true">↓</span><h2>Запустите видео</h2><p>Найденные видео появятся здесь.</p></div>
+  <details id="pageAlternative" class="alternative"><summary>Действия со страницей</summary><button id="inspectPage" class="button wide" type="button">Скачать со страницы</button><p id="prepareHint" class="field-note"></p><button id="page" class="text-button" type="button">Скачать страницу без выбора качества</button></details>
   <details id="streamPicker" class="alternative">
-    <summary>Технические подробности <span id="foundCount"></span></summary>
-    <p class="field-note">Обнаруженные сетевые адреса. Обычно видео выбирается автоматически выше.</p>
+    <summary>Найденные адреса <span id="foundCount"></span></summary>
+    <p class="field-note">Обнаруженные сетевые адреса. Используйте, если нужного видео нет в списке.</p>
     <div class="section-heading"><h2>Найденные потоки</h2><span class="muted" id="addressCount"></span></div>
     <div id="streamsEmpty" class="empty"><h3>Пока нет потоков</h3><p>Запустите видео на текущей странице.</p></div>
     <ul id="streams" class="stream-list"></ul>
     <details id="streamHelp" class="explanation"><summary>Что означают эти потоки?</summary><p>Один ролик может создать несколько адресов. Качество и наличие звука станут известны после подготовки, если источник передаст метаданные.</p><p>Адреса с одинаковым путём показаны в одной карточке, но могут вести к разным вариантам. Их можно выбрать в деталях. Название файла и порядок списка не определяют лучшее качество.</p></details>
   </details>
   <details id="manualEntry" class="alternative">
-    <summary>Вставить другую ссылку</summary>
+    <summary>Вставить ссылку</summary>
     <form id="linkForm" class="link-form"><label for="manualUrl">Ссылка на видео или страницу</label><input id="manualUrl" type="url" placeholder="https://…" required spellcheck="false" autocomplete="off"><button id="inspectLink" class="button wide" type="button">Подготовить по ссылке</button><button id="addLink" class="text-button" type="submit">Скачать ссылку без выбора качества</button><p id="linkHint" class="field-note"></p></form>
   </details>
 </section>
@@ -88,6 +54,8 @@
   <details id="diagnostics" class="explanation diagnostics"><summary>Журнал диагностики</summary><p>Последние 200 событий текущего запуска расширения. Без ссылок, названий видео, путей, cookies и заголовков.</p><div class="diagnostic-actions"><button id="refreshDiagnostics" class="text-button" type="button">Обновить</button><button id="copyDiagnostics" class="text-button" type="button">Копировать журнал</button><button id="clearDiagnostics" class="text-button" type="button">Очистить журнал</button></div><pre id="diagnosticLog" tabindex="0"></pre><p id="diagnosticHint" role="status"></p></details>
 </section>
 </main>
+
 <footer><span class="folder-icon" aria-hidden="true">↳</span><span>Сохраняем в <strong id="folderLabel">Загрузки</strong></span><span class="local-label">ЛОКАЛЬНО</span></footer>
+<nav class="tabs bottom-nav" aria-label="Разделы расширения"><button data-view="streams" aria-pressed="true">Видео <span id="streamCount">0</span></button><button data-view="jobs" aria-pressed="false">Загрузки <span id="jobCount">0</span><span id="completedCount" class="completion-count" hidden></span></button><button id="openManual" type="button">Ссылка</button><button data-view="settings" aria-pressed="false" aria-label="Настройки">⚙</button></nav>
 </body>
 </html>

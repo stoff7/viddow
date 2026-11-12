@@ -1,20 +1,21 @@
-import { canRecoverPageError } from './source-policy.mjs';
+import { MediaCards } from './media-cards.mjs';
 import { downloadCards } from './job-cards.mjs';
 import { groupStreams } from './stream-model.mjs';
 import { visibleMedia, selectMedia } from './media-model.mjs';
-import { formatLabel, mainFormats, choiceProblem, durationLabel, qualityLabel, audioLabel, defaultChoice } from './format-model.mjs';
+import { durationLabel } from './format-model.mjs';
 import { decodeHistory, offlineJobs } from './history-model.mjs';
 
 const $ = (id) => document.getElementById(id);
 const el = (tag, className, text) => Object.assign(document.createElement(tag),
   className ? { className } : {}, text === undefined ? {} : { textContent: text });
 const ACTIVE = new Set(['queued', 'running', 'cancelling']);
-const STATUS = { queued: 'В очереди', running: 'Скачиваем', cancelling: 'Останавливаем…', done: 'Готово', error: 'Ошибка', cancelled: 'Отменено', interrupted: 'Прервано' };
+const STATUS = { queued: 'В очереди', running: 'Скачиваем', cancelling: 'Останавливаем…', done: 'Скачано', error: 'Ошибка', cancelled: 'Отменено', interrupted: 'Прервано' };
 let tab = null, tabKey = '', items = [], state = { jobs: [], settings: {} }, online = false;
 let filter = 'all', settingsDirty = false, refreshRevision = 0, hostRevision = 0;
-let analysisKey = '', dismissedAnalysis = '', inspectPending = false, selectionPending = false;
-let currentDownload = null, preparationState = null, selectedVideoId = '';
-let playerNeedsPreparation = false;
+let inspectPending = false, selectionPending = false;
+let preparationState = null, analysisOrigin = null, mediaJobs = {};
+let completionSession = null, unreadCompleted = 0;
+const completedSeen = new Set();
 const videoPreviews = new Map(), videoPreviewPending = new Set();
 let currentCandidates = [], imageWindowKeys = [], imageScrollTimer;
 let previewRevision = 0, selectedMedia = null, previewDocument = null;
@@ -22,8 +23,21 @@ let pagePreview = null, previewKey = '', autoTimer = null, autoScheduledKey = ''
 const automaticSources = new Set();
 const choices = new Map(), cards = new Map();
 const ownWindow = await chrome.windows.getCurrent();
+let panelStopped = false, previewBusy = false, previewQueued = false, previewTimer = null, lastPreviewAt = 0;
+function panelAlive() {
+  if (panelStopped) return false;
+  try { if (globalThis.chrome?.runtime?.id && chrome.scripting?.executeScript && chrome.tabs?.query) return true; }
+  catch { /* Context can disappear synchronously during an extension reload. */ }
+  panelStopped = true;
+  clearTimeout(previewTimer); clearTimeout(autoTimer); clearTimeout(imageScrollTimer);
+  previewRevision++;
+  $('clientError').hidden = false;
+  $('clientError').textContent = 'Расширение обновлено. Закройте и снова откройте панель.';
+  return false;
+}
 
 async function send(message) {
+  if (!panelAlive()) throw new Error('Откройте панель заново после обновления расширения.');
   const response = await chrome.runtime.sendMessage(message);
   if (!response?.ok) throw new Error(response?.error || 'Нет ответа от расширения. Перезагрузите его.');
   return response.result;
@@ -36,8 +50,10 @@ function notice(text, error = false) {
 function view(name) {
   for (const section of ['streams', 'jobs', 'settings']) $(`${section}View`).hidden = section !== name;
   document.querySelectorAll('[data-view]').forEach((button) => button.setAttribute('aria-pressed', String(button.dataset.view === name)));
+  if (name === 'jobs') { unreadCompleted = 0; renderCompletion(); }
 }
 document.querySelectorAll('[data-view]').forEach((button) => { button.onclick = () => view(button.dataset.view); });
+$('openManual').onclick = () => { view('streams'); $('manualEntry').open = true; $('manualUrl').focus(); };
 function setTheme(theme) {
   document.documentElement.dataset.theme = theme;
   $('theme').setAttribute('aria-label', theme === 'dark' ? 'Светлая тема' : 'Тёмная тема');
@@ -72,21 +88,26 @@ function controls() {
   $('settingsHint').textContent = active ? 'Настройки можно изменить, когда активные загрузки завершатся или будут отменены.' : '';
   $('clear').disabled = !online || !state.jobs.some((job) => !ACTIVE.has(job.status));
   const analysing = inspectPending || ['running', 'cancelling'].includes(state.analysis?.status);
-  $('inspectPage').disabled = !online || inspectPending || !validUrl(tab?.url) || Boolean(currentPreparation()?.downloadPending);
+  $('inspectPage').disabled = !online || inspectPending || !validUrl(tab?.url);
   $('inspectLink').disabled = !online || analysing;
-  const reason = !online ? 'Подключите локальный помощник, чтобы продолжить.' : inspectPending ? 'Проверяем страницу и плееры…' : analysing ? 'Идёт подготовка. Дождитесь результата или отмените её.' : '';
-  $('prepareHint').textContent = reason || (validUrl(tab?.url) ? 'Когда появится видео, подготовим качество и звук автоматически.' : 'Откройте страницу с видео в этой вкладке.');
+  const reason = !online ? 'Подключите локальный помощник.' : analysing ? 'Определяем качество…' : '';
+  $('prepareHint').textContent = reason;
   $('linkHint').textContent = reason;
-  $('cancelAnalysis').disabled = !online || !(state.analysis?.status === 'running' || recovering());
-  updateFormatChoice();
+  renderMediaCards();
 }
 async function refreshTab() {
+  if (!panelAlive() || !Number.isInteger(ownWindow?.id)) return;
   const revision = ++refreshRevision;
-  const [current] = await chrome.tabs.query({ active: true, windowId: ownWindow.id });
+  let current, stored;
+  try {
+    [current] = await chrome.tabs.query({ active: true, windowId: ownWindow.id });
+    stored = current ? await chrome.storage.session.get(`tab_${current.id}`) : {};
+  } catch (error) { if (panelAlive()) notice(error.message, true); return; }
   const key = current ? `tab_${current.id}` : '';
-  const stored = key ? await chrome.storage.session.get(key) : {};
   if (revision !== refreshRevision) return;
+  const changed = tab?.id !== current?.id || tab?.url !== current?.url;
   tab = current; tabKey = key; items = stored[key] || [];
+  if (changed) { previewRevision++; selectedMedia = null; clearPreview(); }
   $('tabTitle').textContent = tab?.title || 'Откройте страницу с видео';
   $('tabHost').textContent = hostOf(tab?.url);
   $('page').hidden = !validUrl(tab?.url);
@@ -95,19 +116,25 @@ async function refreshTab() {
 }
 function clearPreview() {
   currentCandidates = [];
-  for (const img of $('playerImages').querySelectorAll('img')) { img.removeAttribute('src'); img.hidden = true; img.nextElementSibling.hidden = false; }
-  $('pageThumbnail').hidden = true;
-  $('pageThumbnail').removeAttribute('src');
-  $('pageImageMissing').hidden = true;
-  $('pageFacts').hidden = true;
-  $('pageFacts').textContent = '';
-  renderStreamImages();
+  renderStreamImages(); renderMediaCards();
 }
-async function refreshPreview() {
+function refreshPreview() {
+  if (!panelAlive()) return;
+  previewQueued = true;
+  if (previewBusy || previewTimer || document.hidden) return;
+  previewTimer = setTimeout(async () => {
+    previewTimer = null;
+    if (!panelAlive() || document.hidden) return;
+    previewQueued = false; previewBusy = true; lastPreviewAt = Date.now();
+    try { await collectPreview(); }
+    finally { previewBusy = false; if (previewQueued) refreshPreview(); }
+  }, Math.max(0, 300 - (Date.now() - lastPreviewAt)));
+}
+async function collectPreview() {
   const revision = ++previewRevision, current = tab;
   const key = `${current?.id}:${current?.url}`;
-  if (key !== previewKey) { imageWindowKeys = []; $('playerImages').replaceChildren(); $('playerChoice').hidden = true; previewKey = key; pagePreview = null; selectedMedia = null; playerNeedsPreparation = false; previewDocument = null; clearPreview(); }
-  if (!validUrl(current?.url) || $('currentPage').hidden) return;
+  if (key !== previewKey) { imageWindowKeys = []; previewKey = key; pagePreview = null; selectedMedia = null; previewDocument = null; clearPreview(); }
+  if (!validUrl(current?.url)) { renderMediaCards(); return; }
   try {
     const target = { tabId: current.id, allFrames: true };
     await chrome.scripting.executeScript({ target, files: ['page-preview.js'] });
@@ -117,7 +144,7 @@ async function refreshPreview() {
     // Bound transient images across the tab, and always include the selected video.
     const imageRequests = {};
     const inView = initial.filter(media => imageWindowKeys.includes(media.key));
-    const imageWindow = [...new Map([...inView, ...initial].map(media => [media.key, media])).values()].slice(0, 24);
+    const imageWindow = [...new Map([...inView, ...initial].map(media => [media.key, media])).values()].slice(0, 6);
     for (const media of [...(initialChoice ? [initialChoice] : []), ...imageWindow]) {
       (imageRequests[media.documentToken] ||= []).push(media.id);
     }
@@ -132,41 +159,10 @@ async function refreshPreview() {
     const chosen = selectMedia(candidates, selectedMedia);
     if (chosen && selectedMedia?.url) selectedMedia = { key: chosen.key };
     pagePreview = { ...page, hasPlayer: candidates.length > 0 };
-    const picker = $('playerChoice');
-    const options = [{ key: '', label: selectedMedia && !chosen ? 'Выбранный источник недоступен' : 'Выберите плеер' },
-      ...candidates.map((media, index) => ({ key: media.key, label: `Плеер ${index + 1}${media.duration ? ` · ${durationLabel(media)}` : ''}` }))];
-    const signature = JSON.stringify(options);
-    if (picker.dataset.options !== signature) {
-      picker.replaceChildren(...options.map(item => Object.assign(el('option', '', item.label), { value: item.key })));
-      picker.dataset.options = signature;
-    }
-    picker.hidden = candidates.length < 2 && !selectedMedia;
-    picker.value = chosen?.key || '';
-    picker.onchange = () => choosePlayer(picker.value || '__unavailable__');
-    // Page artwork stays page artwork, and never fills a missing player poster.
-    const hasAnyMedia = frames.some(frame => frame.result?.media?.length);
-    const preview = chosen || { poster: !hasAnyMedia && !selectedMedia ? page.pageImage : '', posterSource: 'page', duration: !hasAnyMedia && !selectedMedia ? page.pageDuration : null, durationSource: 'page' };
-    const image = preview.frameImage || preview.poster;
-    $('pageImageMissing').hidden = Boolean(image) || !chosen;
-    $('pageThumbnail').hidden = !image;
-    if (!image) $('pageThumbnail').removeAttribute('src');
-    else {
-      $('pageThumbnail').src = image;
-      $('pageThumbnail').alt = preview.frameImage ? 'Кадр выбранного видео' : preview.posterSource === 'player' ? 'Постер выбранного видео' : 'Изображение со страницы';
-    }
-    renderPlayerImages(candidates, chosen);
-    renderStreamImages();
-    const facts = [];
-    if (preview.frameImage) facts.push('Кадр выбранного видео');
-    if (preview.isLive) facts.push('Прямой эфир по данным плеера');
-    else if (preview.duration != null) facts.push(`${durationLabel({ duration: preview.duration })} · ${preview.durationSource === 'player' ? 'По данным плеера' : 'По данным страницы'}`);
-    if (preview.poster && preview.posterSource === 'page') facts.push('Изображение со страницы');
-    $('pageFacts').textContent = facts.join(' · ');
-    $('pageFacts').hidden = !facts.length;
+    renderMediaCards(); renderStreamImages();
     maybeAutoInspect();
   } catch { /* Restricted/closed documents keep explicit source selection and manual links usable. */ }
 }
-$('pageThumbnail').onerror = () => { $('pageThumbnail').hidden = true; $('pageImageMissing').hidden = false; };
 function renderStreamImages() {
   for (const card of $('streams').children) {
     const [url, frameId, documentId] = JSON.parse(card.dataset.sourceKey);
@@ -178,286 +174,212 @@ function renderStreamImages() {
     else img.removeAttribute('src');
   }
 }
-function renderPlayerImages(candidates, chosen) {
-  const container = $('playerImages');
-  container.hidden = candidates.length < 2;
-  const existing = new Map([...container.children].map(node => [node.dataset.key, node]));
-  const activeKeys = new Set();
-  candidates.forEach((media, index) => {
-    activeKeys.add(media.key);
-    let button = existing.get(media.key);
-    if (!button) {
-      button = el('button', 'player-option'); button.type = 'button'; button.dataset.key = media.key;
-      const img = el('img'); img.referrerPolicy = 'no-referrer'; img.alt = '';
-      const missing = el('span', 'player-image-missing', 'Кадр недоступен');
-      img.onerror = () => { img.hidden = true; missing.hidden = false; };
-      button.append(img, missing, el('span'));
-      button.onclick = () => choosePlayer(media.key);
-      container.append(button);
-    }
-    const [img, missing, label] = button.children;
-    const image = media.frameImage || media.poster;
-    if (image) { if (img.getAttribute('src') !== image) img.src = image; }
-    else img.removeAttribute('src');
-    img.hidden = !image; missing.hidden = Boolean(image);
-    label.textContent = `Плеер ${index + 1}${media.duration ? ` · ${durationLabel(media)}` : ''}`;
-    button.setAttribute('aria-pressed', String(media.key === chosen?.key));
-  });
-  for (const [key, node] of existing) if (!activeKeys.has(key)) node.remove();
-  if (chosen && container.dataset.selected !== chosen.key && !container.hidden) {
-    const button = [...container.children].find(node => node.dataset.key === chosen.key);
-    if (button) container.scrollTop += button.getBoundingClientRect().top - container.getBoundingClientRect().top;
-  }
-  container.dataset.selected = chosen?.key || '';
-}
-$('playerImages').onscroll = () => {
-  const container = $('playerImages'), bounds = container.getBoundingClientRect();
-  const keys = [...container.children].filter(node => { const rect = node.getBoundingClientRect(); return rect.bottom > bounds.top && rect.top < bounds.bottom; }).map(node => node.dataset.key);
+document.addEventListener('scroll', () => {
+  const bounds = $('mediaList').getBoundingClientRect();
+  const keys = [...$('mediaList').children].filter(node => { const rect = node.getBoundingClientRect(); return rect.bottom > 0 && rect.top < innerHeight && rect.top < bounds.bottom; }).map(node => node.dataset.mediaKey).filter(Boolean);
   if (JSON.stringify(keys) === JSON.stringify(imageWindowKeys)) return;
   imageWindowKeys = keys; clearTimeout(imageScrollTimer);
   imageScrollTimer = setTimeout(() => refreshPreview(), 120);
-};
+}, { passive: true });
 chrome.runtime.onMessage.addListener((message, sender) => {
-  if (message.type === 'page_preview_changed' && sender.tab?.id === tab?.id && !$('currentPage').hidden) { clearPreview(); refreshPreview(); }
+  if (message.type === 'page_preview_changed' && sender?.tab?.id === tab?.id) refreshPreview();
 });
+document.addEventListener('visibilitychange', () => { if (!document.hidden && previewQueued) refreshPreview(); });
 function automaticSource() {
-  if (!online || !state.session || !validUrl(tab?.url) || $('currentPage').hidden || inspectPending || selectionPending
+  if (!online || !state.session || !validUrl(tab?.url) || inspectPending || selectionPending
       || ['running', 'cancelling'].includes(state.analysis?.status)) return '';
   if (!items.length && !(pagePreview?.hasPlayer || pagePreview?.hasVideoMetadata)) return '';
+  if (currentCandidates.length > 1 && !selectMedia(currentCandidates, selectedMedia)) return '';
   const key = JSON.stringify([state.session, state.settings.youtube_browser, tab.id, tab.url]);
   return automaticSources.has(key) ? '' : key;
 }
 function maybeAutoInspect() {
+  if (!panelAlive()) return;
   const key = automaticSource();
   if (key === autoScheduledKey) return;
   clearTimeout(autoTimer); autoScheduledKey = key;
   if (!key) return;
-  autoTimer = setTimeout(() => {
+  autoTimer = setTimeout(async () => {
     autoScheduledKey = '';
     if (automaticSource() !== key) return;
+    const scheduledTab = tab?.id, scheduledPage = tab?.url;
+    const chosen = selectMedia(currentCandidates, selectedMedia);
+    if (chosen && selectedMedia?.key !== chosen.key) {
+      try { await choosePlayer(chosen.key); } catch (error) { notice(error.message, true); return; }
+    }
+    if (tab?.id !== scheduledTab || tab?.url !== scheduledPage || automaticSource() !== key) return;
     automaticSources.add(key);
     inspect({ url: tab.url, source_kind: 'page' }, tab.title, tab.url, true);
   }, 600);
 }
-function added(result) {
-  currentDownload = { session: state.session, id: result.ids?.[0] };
-  notice('Добавлено в очередь.');
-  renderCurrentDownload();
+function added() { renderMediaCards(); }
+function renderCompletion() {
+  if (completionSession !== state.session) { completionSession = state.session; completedSeen.clear(); unreadCompleted = 0; }
+  const fresh = state.jobs.filter(job => job.status === 'done' && !job.restored && !completedSeen.has(job.id));
+  for (const job of fresh) completedSeen.add(job.id);
+  if (fresh.length) {
+    if ($('jobsView').hidden) unreadCompleted += fresh.length;
+    $('completionLive').textContent = fresh.map(job => `Скачано: ${job.path?.split(/[\\/]/).pop() || job.name || 'Видео'}`).join('. ');
+  }
+  $('completedCount').hidden = !unreadCompleted;
+  $('completedCount').textContent = unreadCompleted ? `✓ ${unreadCompleted}` : '';
+  $('completedCount').setAttribute('aria-label', `Новых завершённых загрузок: ${unreadCompleted}`);
 }
-function renderCurrentDownload() {
-  const job = currentDownload && currentDownload.session === state.session && state.jobs.find(job => job.id === currentDownload.id);
-  $('currentDownload').hidden = !job;
-  if (!job) return;
-  $('currentDownloadTitle').textContent = job.name || filenameOf(job.url) || 'Загрузка';
-  $('currentDownloadStatus').textContent = [STATUS[job.status], job.error || job.label].filter(Boolean).join(' · ');
-  $('currentDownloadProgress').hidden = !ACTIVE.has(job.status);
-  if (job.fraction == null) $('currentDownloadProgress').removeAttribute('value');
-  else $('currentDownloadProgress').value = Math.max(0, Math.min(1, job.fraction));
+const mediaCards = new MediaCards($('mediaList'), {
+  error: text => notice(text, true), queue: () => view('jobs'),
+  announce: text => { $('completionLive').textContent = text; },
+  direct: async row => {
+    const url = validUrl(row.url) ? row.url : row.prepareUrl;
+    const item = items.find(item => item.url === url) || { url, source_kind: row.pageSource || url !== row.url ? 'page' : 'auto' };
+    const result = await send({ type: 'download', item, title: row.title, page: row.page,
+      cardOrigin: { cardKey: row.key, mediaKey: row.mediaKey, tabId: tab?.id, tabPage: tab?.url,
+        page: row.page, documentToken: previewDocument, title: row.title }, session: row.session });
+    added(result);
+  },
+  prepare: async (row, download) => {
+    if (inspectPending || selectionPending) return;
+    const tabId = tab?.id, page = tab?.url;
+    selectionPending = true; controls();
+    try {
+      if (row.mediaKey) await choosePlayer(row.mediaKey);
+      if (tab?.id !== tabId || tab?.url !== page) return;
+      if (row.mediaKey && !currentCandidates.some(media => media.key === row.mediaKey)) return;
+      const url = row.prepareUrl || row.url;
+      const item = !row.mediaKey && !row.pageSource && items.find(item => item.url === url);
+      await inspect(item || { url, source_kind: row.mediaKey || row.pageSource ? 'page' : 'auto' },
+        row.title, row.page, false, download);
+    } finally { selectionPending = false; controls(); }
+  },
+  cancel: row => send({ type: 'inspect_cancel', analysis_id: row.analysisId, session: row.session }),
+  download: async (row, ids) => {
+    selectionPending = true; controls();
+    try {
+      added(await send({ type: 'download_selection', analysis_id: row.analysisId, source_id: row.result.source_id || row.result.id,
+        format_ids: ids, session: row.session, cardOrigin: { cardKey: row.key, mediaKey: row.mediaKey,
+          tabId: tab?.id, page: row.page, tabPage: tab?.url, documentToken: previewDocument, title: row.title } }));
+    } finally { selectionPending = false; controls(); }
+  },
+  job: (type, job, session) => send({ type, id: job.id, session }),
+});
+function renderMediaCards() {
+  const analysis = state.analysis;
+  const prep = preparationState && preparationState.session === state.session && preparationState.tabId === tab?.id
+    && preparationState.page === tab?.url ? preparationState : null;
+  const origin = prep && prep.analysisId === analysis?.id ? {
+    ...analysisOrigin, session: prep.session, analysisId: prep.analysisId, tabId: prep.tabId, page: prep.page, tabPage: prep.page, sourceKind: 'page',
+    mediaKey: prep.selectedMediaKey,
+    cardKey: prep.selectedMediaKey || JSON.stringify(['page', prep.tabId, prep.page, prep.documentToken]),
+  } : analysisOrigin;
+  const belongs = Boolean(analysis && origin?.session === state.session && origin.analysisId === analysis.id && origin.tabId === tab?.id
+    && (origin.tabPage || origin.page) === tab?.url && (!origin.mediaKey || currentCandidates.some(media => media.key === origin.mediaKey)));
+  const rows = currentCandidates.map((media, index) => ({ key: media.key, mediaKey: media.key,
+    selected: media.key === (selectedMedia?.key || prep?.selectedMediaKey),
+    title: `Видео ${index + 1}`, image: media.frameImage || media.poster || '',
+    duration: media.isLive ? 'Прямой эфир' : media.duration != null ? durationLabel(media) : '',
+    url: media.src || tab.url, prepareUrl: tab.url, page: tab.url, jobs: [], session: state.session }));
+  const owner = belongs && rows.find(row => row.key === origin.cardKey);
+  const preparing = belongs && (['running', 'cancelling'].includes(analysis?.status)
+    || ['waiting', 'recovering'].includes(prep?.phase));
+  let sourceRows = [];
+  if (belongs) {
+    const result = analysis?.result;
+    const videos = analysis?.status === 'done' && prep?.phase !== 'cancelled' && result?.formats?.length
+      ? result.videos?.length ? result.videos : [result] : [];
+    sourceRows = videos.map(video => {
+      // The selected-player preparation already enforces its source boundary.
+      // Batch members remain separate: their source_id cannot be collapsed into a player.
+      const key = videos.length > 1 && (video.id || video.source_id) !== result.source_id
+        ? `${origin.cardKey}:source:${video.id || video.source_id}` : origin.cardKey;
+      const row = rows.find(item => item.key === key) || { key, title: origin.title || 'Видео', jobs: [], session: state.session };
+      const cacheKey = `${state.session}:${analysis.id}:${video.id || video.source_id}`;
+      Object.assign(row, { result: video, analysisId: analysis.id, title: video.title || row.title,
+        image: videoPreviews.get(cacheKey) || row.image || video.thumbnail || '',
+        duration: durationLabel(video), url: video.source_url || analysis.url, prepareUrl: origin.url || origin.page,
+        page: origin.page, pageSource: origin.sourceKind === 'page',
+        mediaKey: origin.mediaKey || null, pending: Boolean(prep?.downloadPending), preparing: Boolean(prep?.downloadPending) });
+      if (!rows.includes(row)) rows.push(row);
+      return row;
+    });
+    if (!sourceRows.length) {
+      const row = owner || { key: origin.cardKey, title: origin.title || tab?.title || 'Видео',
+        url: origin.url || analysis.url, prepareUrl: origin.url || origin.page, page: origin.page,
+        pageSource: origin.sourceKind === 'page', jobs: [], session: state.session };
+      Object.assign(row, { analysisId: analysis.id, preparing, pending: Boolean(prep?.downloadPending),
+        error: prep?.error || (analysis.status === 'error' && !preparing ? analysis.error : ''), errorDetail: analysis.error_detail,
+        note: prep?.phase === 'cancelled' || analysis.status === 'cancelled' ? 'Подготовка отменена' : '' });
+      if (!rows.includes(row)) rows.push(row);
+    }
+    requestCardPreviews(videos, analysis);
+  }
+  const bindings = mediaJobs?.session === state.session ? mediaJobs.jobs || {} : {};
+  const allJobs = downloadCards(state.jobs);
+  for (const job of allJobs) {
+    const binding = bindings[job.id];
+    if (!binding || binding.tabId !== tab?.id || (binding.tabPage || binding.page) !== tab?.url) continue;
+    if (binding.mediaKey && !currentCandidates.some(media => media.key === binding.mediaKey)) continue;
+    if (!binding.mediaKey && binding.documentToken && binding.documentToken !== previewDocument) continue;
+    if (!rows.some(row => row.key === binding.cardKey)) rows.push({ key: binding.cardKey, mediaKey: binding.mediaKey,
+      title: job.name || binding.title || 'Видео', url: job.url, prepareUrl: binding.page, page: binding.page,
+      pageSource: true, session: state.session, jobs: [] });
+  }
+  for (const row of rows) row.jobs = allJobs.filter(job => bindings[job.id]?.cardKey === row.key);
+  const count = mediaCards.render(rows, { online, ffmpeg: state.tools?.ffmpeg, inspectPending: inspectPending || selectionPending });
+  for (const [key, card] of mediaCards.cards) card.root.dataset.mediaKey = rows.find(row => row.key === key)?.mediaKey || '';
+  $('mediaEmpty').hidden = count > 0;
+  $('streamCount').textContent = count;
+  $('pageAlternative').hidden = !validUrl(tab?.url);
 }
-$('openJobs').onclick = () => view('jobs');
+function requestCardPreviews(videos, analysis) {
+  // Keep the existing native preview cache and six-source preparation bound.
+  for (const video of videos.slice(0, 6)) {
+    const sourceId = video.id || video.source_id;
+    if (!analysis.result?.videos?.length || !sourceId) continue;
+    const session = state.session, key = `${session}:${analysis.id}:${sourceId}`;
+    if (videoPreviews.has(key) || videoPreviewPending.has(key)) continue;
+    videoPreviewPending.add(key);
+    (async () => {
+      try {
+        const reply = await send({ type: 'preview', session, analysis_id: analysis.id, source_id: sourceId });
+        if (session !== state.session || analysis.id !== state.analysis?.id || reply.source_id !== sourceId) return;
+        videoPreviews.set(key, /^data:image\/gif;base64,[A-Za-z0-9+/=]+$/.test(reply.image || '') && reply.image.length <= 128 * 1024 ? reply.image : null);
+      } catch { videoPreviews.set(key, null); }
+      finally {
+        videoPreviewPending.delete(key);
+        while (videoPreviews.size > 12) videoPreviews.delete(videoPreviews.keys().next().value);
+        if (session === state.session && analysis.id === state.analysis?.id) renderMediaCards();
+      }
+    })();
+  }
+}
 async function start(item, title = '', page = '') {
-  added(await send({ type: 'download', item, title, page }));
+  try { added(await send({ type: 'download', item, title, page })); view('jobs'); }
+  catch (error) { notice(error.message, true); }
 }
 async function inspect(item, title = '', page = '', automatic = false, downloadAfterPrepare = false) {
   if (!automatic && item.kind) { selectedMedia = { url: item.url, frameId: item.frameId, documentId: item.documentId }; clearPreview(); refreshPreview(); }
   inspectPending = true; controls(); notice('');
   const selectedAtStart = selectedMedia?.key || null;
   try {
-    const result = await send({ type: 'inspect', item, title, page, automatic, downloadAfterPrepare, selectedMediaKey: selectedMedia?.key || null, tabId: tab?.id,
+    const result = await send({ type: 'inspect', item, title, page, tabPage: tab?.url, automatic, downloadAfterPrepare, selectedMediaKey: item.source_kind === 'page' && item.url === tab?.url ? selectedMedia?.key || null : null, tabId: tab?.id,
       session: state.session, expected_analysis_id: state.analysis?.id || null });
     if (result.skipped) return;
     if ((selectedMedia?.key || null) !== selectedAtStart) return;
-    if (!automatic) playerNeedsPreparation = false;
-    dismissedAnalysis = ''; renderAnalysis();
-    if (!automatic) { view('streams'); $('analysisStatus').focus(); }
+    renderAnalysis();
+    if (!automatic) view('streams');
   } catch (error) { notice(error.message, true); }
   finally { inspectPending = false; controls(); renderStreams(); }
 }
-function currentPreparation() {
-  const current = preparationState;
-  if (!current || current.session !== state.session || current.tabId !== tab?.id || current.page !== tab?.url) return null;
-  if ((current.selectedMediaKey || null) !== (selectedMedia?.key || null)) return null;
-  if (current.analysisId !== state.analysis?.id && !(current.phase === 'recovering' && state.analysis?.page === current.page)) return null;
-  return current;
-}
 async function choosePlayer(key) {
   selectedMedia = { key };
-  playerNeedsPreparation = true;
-  if (state.analysis) dismissedAnalysis = `${state.session}:${state.analysis.id}`;
-  clearPreview(); renderAnalysis(); controls();
-  try { await send({ type: 'player_selection', tabId: tab?.id, key }); }
-  catch (error) { notice(error.message, true); }
-  refreshPreview();
+  await send({ type: 'player_selection', tabId: tab?.id, key });
+  renderMediaCards();
 }
-function recovering() { const current = currentPreparation(); return ['waiting', 'blocked', 'recovering'].includes(current?.phase) || current?.phase === 'page' && canRecoverPageError(tab?.url, state.analysis); }
-function videoResult() {
-  const result = state.analysis?.result;
-  return result?.videos?.find(video => video.id === selectedVideoId) || result;
-}
-function renderVideoImages() {
-  const analysis = state.analysis, result = videoResult();
-  if (!result || analysis?.status !== 'done') return;
-  const cacheKey = id => `${state.session}:${analysis.id}:${id}`;
-  const videos = analysis.result.videos || [];
-  const imageFor = video => {
-    const matches = items.filter(item => item.url === (video.source_url || analysis.url));
-    const media = matches.length === 1 ? selectMedia(currentCandidates, matches[0]) : null;
-    return videoPreviews.get(cacheKey(video.id)) || media?.frameImage || video.thumbnail || media?.poster || '';
-  };
-  const image = imageFor(result);
-  $('videoThumbnail').hidden = !image;
-  $('videoImageMissing').hidden = Boolean(image);
-  $('videoImageMissing').textContent = videos.length && !videoPreviews.has(cacheKey(result.id)) ? 'Готовим превью…' : 'Превью недоступно';
-  if (image) { if ($('videoThumbnail').getAttribute('src') !== image) $('videoThumbnail').src = image; }
-  else $('videoThumbnail').removeAttribute('src');
-  $('videoThumbnail').alt = image.startsWith('data:image/gif') ? 'Короткое превью выбранного видео' : 'Изображение выбранного видео';
-  $('videoThumbnail').onerror = () => { $('videoThumbnail').hidden = true; $('videoImageMissing').hidden = false; $('videoImageMissing').textContent = 'Превью недоступно'; };
-  const container = $('analysisVideos');
-  container.hidden = videos.length < 2;
-  if (container.dataset.analysis !== `${state.session}:${analysis.id}`) {
-    container.replaceChildren(...videos.map((video, index) => {
-      const button = el('button', 'player-option'); button.type = 'button'; button.dataset.source = video.id;
-      const img = el('img'); img.alt = ''; img.referrerPolicy = 'no-referrer';
-      const missing = el('span', 'player-image-missing', 'Готовим превью…');
-      img.onerror = () => { img.hidden = true; missing.hidden = false; missing.textContent = 'Превью недоступно'; };
-      button.append(img, missing, el('span', '', `Видео ${index + 1} · ${qualityLabel(mainFormats(video.formats)[0])}`));
-      button.onclick = () => { selectedVideoId = video.id; analysisKey = ''; renderAnalysis(); controls(); };
-      return button;
-    }));
-    container.dataset.analysis = `${state.session}:${analysis.id}`;
-  }
-  for (const button of container.children) {
-    const video = videos.find(video => video.id === button.dataset.source);
-    const [img, missing] = button.children, image = imageFor(video);
-    img.hidden = !image; missing.hidden = Boolean(image);
-    if (image && img.getAttribute('src') !== image) img.src = image;
-    if (!image && videoPreviews.has(cacheKey(video.id))) missing.textContent = 'Превью недоступно';
-    button.setAttribute('aria-pressed', String(video.id === selectedVideoId));
-  }
-  for (const video of [...videos].sort((a, b) => Number(b.id === selectedVideoId) - Number(a.id === selectedVideoId))) {
-    const key = cacheKey(video.id);
-    if (videoPreviews.has(key) || videoPreviewPending.has(key)) continue;
-    videoPreviewPending.add(key);
-    const session = state.session, analysisId = analysis.id;
-    send({ type: 'preview', session, analysis_id: analysisId, source_id: video.id }).then(reply => {
-      if (session !== state.session || analysisId !== state.analysis?.id || reply.source_id !== video.id) return;
-      videoPreviews.set(key, /^data:image\/gif;base64,[A-Za-z0-9+/=]+$/.test(reply.image || '') && reply.image.length <= 128 * 1024 ? reply.image : null);
-    }).catch(() => { videoPreviews.set(key, null); }).finally(() => {
-      videoPreviewPending.delete(key);
-      while (videoPreviews.size > 12) videoPreviews.delete(videoPreviews.keys().next().value);
-      if (session === state.session && analysisId === state.analysis?.id) renderVideoImages();
-    });
-  }
-}
-$('videoChoice').onchange = () => { selectedVideoId = $('videoChoice').value; analysisKey = ''; renderAnalysis(); controls(); };
-function selectedFormats() {
-  const main = videoResult()?.formats.find(format => format.id === $('videoFormat').value);
-  const audio = main?.kind === 'video' && !$('silentVideo').checked
-    ? [...$('audioFormats').querySelectorAll('input:checked')].map(input => input.value) : [];
-  return { main, audio };
-}
-function updateFormatChoice() {
-  const { main, audio } = selectedFormats();
-  const problem = choiceProblem(main, audio, state.tools?.ffmpeg, $('silentVideo').checked);
-  $('audioChoices').hidden = main?.kind !== 'video';
-  $('downloadFormat').disabled = !online || state.analysis?.status !== 'done'
-    || playerNeedsPreparation || `${state.session}:${state.analysis?.id}` === dismissedAnalysis || Boolean(problem) || selectionPending || Boolean(currentPreparation()?.downloadPending);
-  $('formatDetails').textContent = main ? [formatLabel(main), ...audio.map(id => formatLabel(videoResult().formats.find(format => format.id === id)))].join('\n') : '';
-  $('formatHint').textContent = !online ? 'Подключите локальный помощник, чтобы скачать выбранное.' : problem || (main?.kind === 'combined' ? 'Звук уже встроен в этот формат.' : main?.kind === 'unknown'
-    ? 'Состав дорожек не указан источником. Скачается выбранный формат.' : $('silentVideo').checked ? 'Будет сохранено видео без звука.' : main?.kind === 'audio' ? 'Будет сохранён только звук.' : 'Будут сохранены выбранные дорожки.');
-}
-function renderAnalysis() {
-  const analysis = state.analysis;
-  const visible = Boolean(analysis && !playerNeedsPreparation && `${state.session}:${analysis.id}` !== dismissedAnalysis);
-  const running = ['running', 'cancelling'].includes(analysis?.status) || recovering();
-  const preparingPage = visible && running && (analysis.url === tab?.url || recovering());
-  $('analysisCard').hidden = !visible;
-  $('analysisIdentity').hidden = preparingPage;
-  $('currentPage').hidden = visible && !preparingPage;
-  $('inspectPage').hidden = false;
-  $('inspectPage').textContent = currentPreparation()?.downloadPending ? 'Скачивание начнётся после подготовки…' : preparingPage ? 'Скачать после подготовки' : 'Скачать';
-  $('prepareHint').hidden = preparingPage;
-  $('pageAlternative').hidden = !validUrl(tab?.url) || (visible && analysis.url !== tab?.url);
-  if (!analysis) { analysisKey = ''; $('analysisResult').hidden = true; updateFormatChoice(); return; }
-  const sourceUrl = new URL(analysis.url);
-  $('analysisSource').textContent = sourceUrl.host + decoded(sourceUrl.pathname);
-  $('analysisSource').title = sourceUrl.host + decoded(sourceUrl.pathname);
-  $('analysisUrl').textContent = analysis.url;
-  $('analysisContext').hidden = analysis.url === tab?.url || analysis.page === tab?.url;
-  $('cancelAnalysis').hidden = !running;
-  $('closeAnalysis').hidden = running;
-  $('analysisStatus').textContent = currentPreparation()?.error || (currentPreparation()?.phase === 'cancelled' ? 'Подготовка отменена. Можно попробовать снова.' : recovering() ? currentPreparation().phase === 'waiting' ? 'Ждём появления видео на странице…' : 'Проверяем найденные видео и выбираем лучший вариант…' : analysis.status === 'running' ? 'Ищем видео и доступные варианты… Скачивание ещё не началось.' : analysis.status === 'cancelling'
-    ? 'Останавливаем подготовку…' : analysis.status === 'error' ? analysis.error : analysis.status === 'cancelled' ? 'Подготовка отменена. Можно вернуться к текущей вкладке и попробовать снова.' : analysis.result?.formats?.length ? 'Видео готово к скачиванию.' : 'Источник не передал варианты. Можно скачать без выбора качества.');
-  $('analysisStatus').classList.toggle('error', Boolean(currentPreparation()?.error) || analysis.status === 'error' && !recovering() && currentPreparation()?.phase !== 'cancelled');
-  $('analysisDiagnostic').hidden = !analysis.error_detail || analysis.error_detail === analysis.error;
-  $('analysisErrorDetail').textContent = analysis.error_detail || '';
-  $('analysisResult').hidden = analysis.status !== 'done' || !analysis.result?.formats?.length;
-  $('analysisFallback').hidden = running || (analysis.status === 'done' && Boolean(analysis.result?.formats?.length));
-  const videos = analysis.result?.videos || [];
-  const identity = `${state.session}:${analysis.id}:${videos.map(video => video.id).join(',')}`;
-  if ($('videoChoice').dataset.analysis !== identity) {
-    selectedVideoId = analysis.result?.source_id || '';
-    $('videoChoice').replaceChildren(...videos.map((video, index) => Object.assign(el('option', '',
-      `Видео ${index + 1} · ${qualityLabel(mainFormats(video.formats)[0])}${index === 0 ? ' · Рекомендуем' : ''}`), { value: video.id })));
-    $('videoChoice').dataset.analysis = identity;
-  }
-  $('videoChoiceLabel').hidden = videos.length < 2;
-  $('videoChoice').value = selectedVideoId;
-  const key = `${state.session}:${analysis.id}:${analysis.status}:${selectedVideoId}`;
-  if (key !== analysisKey && analysis.status === 'done') {
-    const result = videoResult();
-    $('videoTitle').textContent = result.title;
-    $('videoTitle').title = result.title;
-    $('videoFacts').textContent = durationLabel(result);
-    if (result.source_url) { const source = new URL(result.source_url); $('analysisSource').textContent = source.host + decoded(source.pathname); $('analysisUrl').textContent = result.source_url; }
-    renderVideoImages();
-    const defaults = defaultChoice(result.formats, state.tools?.ffmpeg);
-    const formats = mainFormats(result.formats);
-    const labels = formats.map(qualityLabel);
-    $('videoFormat').replaceChildren(...formats.map((format, index) => {
-      const label = labels[index];
-      const option = el('option', '', labels.filter(value => value === label).length > 1 ? `${label} · ${format.id}` : label);
-      option.value = format.id; option.selected = format.id === defaults.main; return option;
-    }));
-    $('silentVideo').checked = false;
-    $('audioFormats').replaceChildren(...result.formats.filter(format => format.kind === 'audio').map(format => {
-      const label = el('label', 'audio-option'), input = el('input');
-      input.type = 'checkbox'; input.value = format.id; input.checked = defaults.audio.includes(format.id);
-      input.onchange = () => { if (input.checked) $('silentVideo').checked = false; updateFormatChoice(); };
-      label.append(input, el('span', '', `${audioLabel(format)}${result.formats.filter(item => item.kind === 'audio' && audioLabel(item) === audioLabel(format)).length > 1 ? ` · ${format.id}` : ''}`)); return label;
-    }));
-  }
-  analysisKey = key;
-  updateFormatChoice();
-}
-$('inspectPage').onclick = () => inspect({ url: tab.url, source_kind: 'page' }, tab.title, tab.url, false, true);
+function renderAnalysis() { renderMediaCards(); }
+$('inspectPage').onclick = () => { if (tab && validUrl(tab.url)) inspect({ url: tab.url, source_kind: 'page' }, tab.title, tab.url, false, true); };
 $('inspectLink').onclick = () => {
   const url = $('manualUrl').value.trim();
   if (!validUrl(url)) { notice('Нужен адрес http:// или https://', true); return; }
   inspect({ url });
-};
-$('cancelAnalysis').onclick = async () => {
-  try { await send({ type: 'inspect_cancel', analysis_id: state.analysis.id, session: state.session }); }
-  catch (error) { notice(error.message, true); }
-};
-$('closeAnalysis').onclick = () => { dismissedAnalysis = `${state.session}:${state.analysis.id}`; renderAnalysis(); refreshPreview(); $('inspectPage').focus(); };
-$('chooseStream').onclick = () => { $('streamPicker').open = true; $('streamPicker').querySelector('summary').focus(); $('streamPicker').scrollIntoView({ block: 'start' }); };
-$('videoFormat').onchange = () => { $('silentVideo').checked = false; updateFormatChoice(); };
-$('silentVideo').onchange = () => {
-  if ($('silentVideo').checked) $('audioFormats').querySelectorAll('input').forEach(input => { input.checked = false; });
-  updateFormatChoice();
-};
-$('formatForm').onsubmit = async event => {
-  event.preventDefault();
-  const { main, audio } = selectedFormats();
-  const problem = choiceProblem(main, audio, state.tools?.ffmpeg, $('silentVideo').checked);
-  if (problem) { notice(problem, true); return; }
-  selectionPending = true; controls();
-  try {
-    added(await send({ type: 'download_selection', analysis_id: state.analysis.id,
-      format_ids: [main.id, ...audio], source_id: selectedVideoId || undefined, session: state.session }));
-  } catch (error) { notice(error.message, true); }
-  finally { selectionPending = false; controls(); }
 };
 async function copy(text) {
   await navigator.clipboard.writeText(text);
@@ -468,7 +390,6 @@ function renderStreams() {
   const open = new Set([...$('streams').querySelectorAll('details[open]')].map((node) => node.dataset.key));
   const focusedUrl = document.activeElement?.dataset?.url;
   const focusedAction = document.activeElement?.dataset?.action;
-  $('streamCount').textContent = groups.length;
   $('foundCount').textContent = groups.length ? `(${groups.length})` : '';
   $('addressCount').textContent = items.length ? `Адресов: ${items.length}` : '';
   $('streamsEmpty').hidden = Boolean(groups.length);
@@ -562,7 +483,10 @@ function renderJobs() {
   $('jobCount').textContent = jobs.length;
   const running = jobs.filter((job) => ['running', 'cancelling'].includes(job.status)).length;
   const queued = jobs.filter((job) => job.status === 'queued').length;
-  $('queueSummary').textContent = running || queued ? `В работе: ${running} · В очереди: ${queued}` : 'Нет активных загрузок';
+  const completed = jobs.filter(job => job.status === 'done').length;
+  const errors = jobs.filter(job => job.status === 'error').length;
+  $('queueSummary').textContent = running || queued ? `В работе: ${running} · В очереди: ${queued}`
+    : completed ? `Скачано: ${completed}${errors ? ` · Ошибки: ${errors}` : ''}` : 'Нет активных загрузок';
   $('workerCount').textContent = state.settings.workers ? `Лимит: ${state.settings.workers}` : '';
   const existing = new Set(jobs.map((job) => job.id));
   for (const [id, card] of cards) if (!existing.has(id)) { card.root.remove(); cards.delete(id); }
@@ -621,18 +545,18 @@ function renderJobs() {
         card.actions.append(action('Обновить ссылку', () => inspect({ url: job.page, source_kind: 'page' }, job.name || '', job.page)));
       }
       if (online && job.restored && job.page_retry) card.actions.append(action('Повторить со страницы', async () => {
-        await command('inspect_history'); dismissedAnalysis = ''; view('streams');
+        await send({ type: 'inspect_history', id: job.id, session: state.session, tabId: tab?.id, tabPage: tab?.url }); view('streams');
         notice('Проверяем исходную страницу. Подтвердите формат перед загрузкой.');
       }));
       if (job.status === 'done') {
-        if (online && job.file_exists !== false) card.actions.append(action('В Finder', () => command('reveal')));
+        if (online && job.path && job.file_exists !== false) card.actions.append(action('Показать файл', () => command('reveal')));
         if (job.path) card.actions.append(action('Копировать путь', () => copy(job.path)));
       }
     }
   });
   $('jobsEmpty').hidden = visible > 0;
   $('jobsEmpty').querySelector('h3').textContent = jobs.length ? 'В этом фильтре пока нет задач' : 'Здесь будут ваши загрузки';
-  renderCurrentDownload(); controls();
+  controls();
 }
 function renderState(next) {
   state = next || { jobs: [], settings: {} };
@@ -645,19 +569,17 @@ function renderState(next) {
   $('folderLabel').textContent = folder.endsWith('/Downloads') ? 'Загрузки' : folder.split('/').filter(Boolean).pop();
   $('folderLabel').title = folder;
   $('toolsStatus').textContent = state.tools ? `yt-dlp: ${state.tools.yt_dlp ? 'найден' : 'не найден'}. ffmpeg: ${state.tools.ffmpeg ? 'найден' : 'не найден'}.` : 'Подключите помощник, чтобы проверить инструменты.';
-  const wasChoosing = $('currentPage').hidden;
-  renderAnalysis(); renderJobs(); renderStreams();
-  if (wasChoosing && !$('currentPage').hidden) refreshPreview();
+  renderAnalysis(); renderJobs(); renderStreams(); renderCompletion();
 }
 function renderHost(host) {
   hostRevision++;
   online = host?.status === 'online';
   $('hostDot').className = `dot ${online ? 'online' : host?.status === 'offline' ? 'offline' : ''}`;
-  $('hostStatus').textContent = online ? 'Загрузчик подключён' : host?.status === 'connecting' ? 'Подключаем загрузчик…' : 'Помощник недоступен';
+  $('hostStatus').textContent = online ? 'Подключён' : host?.status === 'connecting' ? 'Подключаем…' : 'Нет подключения';
   $('hostError').hidden = !host?.error;
   $('hostError').textContent = host?.error || '';
   $('reconnect').hidden = online || host?.status === 'connecting';
-  controls(); renderJobs(); renderStreams();
+  controls(); renderJobs(); renderStreams(); renderCompletion();
 }
 async function connect() {
   renderHost({ status: 'connecting' });
@@ -671,7 +593,7 @@ async function connect() {
   catch (error) { renderHost({ status: 'offline', error: error.message }); }
 }
 $('reconnect').onclick = connect;
-$('page').onclick = () => $('inspectPage').click();
+$('page').onclick = () => { if (tab && validUrl(tab.url)) start({ url: tab.url, source_kind: 'page' }, tab.title, tab.url); };
 $('linkForm').onsubmit = async (event) => {
   event.preventDefault();
   const url = $('manualUrl').value.trim();
@@ -704,18 +626,20 @@ document.querySelectorAll('[data-filter]').forEach((button) => {
     renderJobs();
   };
 });
-chrome.tabs.onActivated.addListener((info) => { if (info.windowId === ownWindow.id) refreshTab(); });
+chrome.tabs.onActivated.addListener((info) => { if (info.windowId === ownWindow?.id) refreshTab(); });
 chrome.tabs.onUpdated.addListener((id, changes) => { if (id === tab?.id && (changes.url || changes.title || changes.status)) refreshTab(); });
 chrome.storage.session.onChanged.addListener((changes) => {
   if (changes[tabKey]) { items = changes[tabKey].newValue || []; renderStreams(); }
+  if (changes.mediaJobs) { mediaJobs = changes.mediaJobs.newValue || {}; renderMediaCards(); }
+  if (changes.analysisOrigin) { analysisOrigin = changes.analysisOrigin.newValue; renderMediaCards(); }
   if (changes.preparation) { preparationState = changes.preparation.newValue; renderAnalysis(); controls(); }
-  if (changes.smartDownload) { const result = changes.smartDownload.newValue; if (result?.tabId === tab?.id && result.session === state.session) added(result); }
+  if (changes.smartDownload) { const result = changes.smartDownload.newValue; if (result && tab && result.tabId === tab.id && result.session === state.session) added(result); }
   if (changes.nativeState) renderState(changes.nativeState.newValue);
   if (changes.host) renderHost(changes.host.newValue);
   if (changes.historyStatus) renderHistoryStatus(changes.historyStatus.newValue);
 });
-const stored = await chrome.storage.session.get(['nativeState', 'host', 'historyStatus', 'preparation']);
-preparationState = stored.preparation;
+const stored = await chrome.storage.session.get(['nativeState', 'host', 'historyStatus', 'preparation', 'mediaJobs', 'analysisOrigin']);
+preparationState = stored.preparation; mediaJobs = stored.mediaJobs || {}; analysisOrigin = stored.analysisOrigin;
 const history = decodeHistory(preferences.history);
 renderState(stored.nativeState || { jobs: offlineJobs(history.history), settings: preferences.settings || {} }); renderHost(stored.host);
 renderHistoryStatus(stored.historyStatus || { warning: history.warning });

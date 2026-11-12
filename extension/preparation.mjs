@@ -7,8 +7,12 @@ export class VideoPreparation {
   constructor(io) { this.io = io; this.current = null; this.running = false; this.dirty = false; this.timer = null; }
   async publish() {
     const value = this.current;
-    await this.io.publish(value ? { tabId: value.tabId, page: value.page, documentToken: value.documentToken,
-      session: value.session, selectedMediaKey: value.selectedMediaKey || null, analysisId: value.analysisId, phase: value.phase, downloadPending: value.download, error: value.error || '' } : null);
+    const state = value ? { tabId: value.tabId, page: value.page, documentToken: value.documentToken,
+      session: value.session, selectedMediaKey: value.selectedMediaKey || null, analysisId: value.analysisId, phase: value.phase, downloadPending: value.download, error: value.error || '' } : null;
+    const signature = JSON.stringify(state);
+    if (this.published === signature) return;
+    await this.io.publish(state);
+    this.published = signature;
   }
   async begin(value) {
     this.cancel();

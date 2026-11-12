@@ -7,7 +7,8 @@
     const fields = { name: error?.name };
     if (location) Object.assign(fields, { file: location[1], line: Number(location[2]), column: Number(location[3]) });
     // Never forward the raw message/stack: either can contain private URLs.
-    chrome.runtime.sendMessage({ type: 'diagnostic', event, fields }).catch(() => {});
+    try { globalThis.chrome?.runtime?.sendMessage?.({ type: 'diagnostic', event, fields })?.catch(() => {}); }
+    catch { /* Reporting must not recurse when the extension context is gone. */ }
   };
   async function readLog() {
     const response = await chrome.runtime.sendMessage({ type: 'diagnostics_read' });
@@ -35,7 +36,9 @@
     readLog().catch(() => { $('diagnosticLog').textContent = 'Не удалось прочитать журнал.'; });
   }
   function failure(error) {
+    if (failed) return;
     failed = true;
+    clearTimeout(watchdog);
     report('panel_error', error);
     showFailure();
   }
@@ -65,7 +68,7 @@
         await readLog(); $('diagnosticHint').textContent = 'Журнал очищен.';
       } catch { $('diagnosticHint').textContent = 'Не удалось очистить журнал.'; }
     };
-    chrome.storage.session.onChanged.addListener(changes => {
+    globalThis.chrome?.storage?.session?.onChanged?.addListener(changes => {
       if (changes.diagnosticLog && $('diagnostics').open) readLog().catch(() => {});
     });
     if (failed) showFailure();
