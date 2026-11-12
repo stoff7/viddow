@@ -6,6 +6,8 @@ import tempfile
 import time
 
 import download
+from diagnostics import describe_error
+from trace_log import trace_event
 
 MAX_PREVIEW = 128 * 1024
 
@@ -26,7 +28,9 @@ def recommended(result, ffmpeg=None):
 
     best = max(main, key=rank)
     ids = [best['id']]
-    if best['kind'] == 'video':
+    if best['kind'] in ('unknown', 'audio'):
+        ids = []  # A video click must never silently become an audio download.
+    elif best['kind'] == 'video':
         if not ffmpeg or len(audio) != 1:
             ids = []  # Do not silently pick a language or remove sound.
         else:
@@ -50,8 +54,8 @@ def preview_gif(context, cancel):
         headers = ''.join(f'{key}: {value}\r\n' for key, value in context['headers'].items())
         command = [executable, '-nostdin', '-y', '-hide_banner', '-loglevel', 'error',
                    '-rw_timeout', '5000000', '-probesize', '1048576', '-analyzeduration', '1000000',
-                   '-headers', headers, '-protocol_whitelist', 'http,https,tcp,tls,crypto', '-i', context['url'], '-t', '2', '-an',
-                   '-vf', "fps=4,scale=320:180:force_original_aspect_ratio=decrease", '-frames:v', '8',
+                   '-headers', headers, '-protocol_whitelist', 'http,https,tcp,tls,crypto', '-t', '2', '-i', context['url'], '-t', '2', '-an',
+                   '-vf', "fps=4,scale=160:90:force_original_aspect_ratio=decrease,split[a][b];[a]palettegen=max_colors=32[p];[b][p]paletteuse=dither=bayer:bayer_scale=5", '-frames:v', '8',
                    '-fs', str(MAX_PREVIEW), path]
         try:
             download.run_tool(command, lambda _: None, Stop())
@@ -59,8 +63,13 @@ def preview_gif(context, cancel):
             with open(path, 'rb') as image:
                 data = image.read(MAX_PREVIEW + 1)
             if not data.startswith((b'GIF87a', b'GIF89a')) or len(data) > MAX_PREVIEW:
+                trace_event('preview_error', code='preview_too_large' if len(data) > MAX_PREVIEW else 'preview_no_video', bytes_count=len(data))
                 return None
             encoded = 'data:image/gif;base64,' + base64.b64encode(data).decode('ascii')
-            return encoded if len(encoded) <= MAX_PREVIEW else None
-        except (download.Cancelled, OSError, RuntimeError):
+            if len(encoded) > MAX_PREVIEW:
+                trace_event('preview_error', code='preview_too_large', bytes_count=len(encoded))
+                return None
+            return encoded
+        except (download.Cancelled, OSError, RuntimeError) as error:
+            trace_event('preview_error', code=describe_error(error)[0])
             return None

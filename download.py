@@ -17,6 +17,7 @@ from trace_log import trace_event
 import argparse
 import glob
 import itertools
+import json
 import os
 import re
 import shutil
@@ -277,7 +278,7 @@ def request_headers(referer, browser_headers):
 
 
 def download(url, folder=DEFAULT_DIR, name=None, referer=None, progress=draw, browser_headers=None,
-             page_url=None, cancel=None, source_kind="auto", format_ids=None, stream_kind=None, cookie_browser="none"):
+             page_url=None, cancel=None, source_kind="auto", format_ids=None, stream_kind=None, cookie_browser="none", prepared_info=None):
     """Смотрит, что отдал сервер, и выбирает способ — как расширения по заголовкам ответа.
 
     name — заголовок страницы или своё имя; приводится к nice_name() по адресу страницы
@@ -299,7 +300,7 @@ def download(url, folder=DEFAULT_DIR, name=None, referer=None, progress=draw, br
             **({"Referer": referer} if referer else {}), **(browser_headers or {})}
         return run_ytdlp(url, folder, name, headers, progress,
                          stream=source_kind != "page" and (bool(stream_kind) or urllib.parse.urlparse(url).path.lower().endswith(STREAM_EXT)),
-                         cancel=cancel, format_ids=format_ids, cookie_browser=cookie_browser)
+                         cancel=cancel, format_ids=format_ids, cookie_browser=cookie_browser, **({'prepared_info': prepared_info} if prepared_info else {}))
     if source_kind == "page":
         return download_page(url, folder, name, referer, progress, browser_headers, cancel, cookie_browser)
     headers = request_headers(referer, browser_headers)
@@ -437,7 +438,7 @@ def download_page(url, folder, name, referer, progress, browser_headers=None, ca
     return run_ytdlp(url, folder, name, headers, progress, cancel=cancel, cookie_browser=cookie_browser)
 
 
-def run_ytdlp(url, folder, name, headers, progress, stream=False, cancel=None, format_ids=None, cookie_browser="none"):
+def run_ytdlp(url, folder, name, headers, progress, stream=False, cancel=None, format_ids=None, cookie_browser="none", prepared_info=None):
     """yt-dlp с параллельной загрузкой кусочков потока и заданными заголовками.
 
     stream=True — ссылка на поток, пойманная в браузере:
@@ -506,14 +507,21 @@ def run_ytdlp(url, folder, name, headers, progress, stream=False, cancel=None, f
             command += ["-f", "bv*+mergeall[vcodec=none]/b", "--audio-multistreams"]
         if stream:
             command += ["--impersonate", "chrome"]
-        for key, value in headers.items():
+        for key, value in ({} if prepared_info else headers).items():
             command += ["--add-headers", f"{key}:{value}"]
+        inputs = ['--', url]
+        if prepared_info:
+            info_path = os.path.join(tmp, 'selected.json')
+            with os.fdopen(os.open(info_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600), 'w', encoding='utf-8') as info_file:
+                json.dump(prepared_info, info_file)
+            inputs = ['--load-info-json', info_path]
+            command += ['--ignore-config', '--no-write-info-json', '--no-embed-info-json']
         try:
             check_cancel(cancel)
             progress(None, "подготовка…")
             # видео и звук часто качаются отдельно — тогда полоса пройдёт дважды
             try:
-                run_ytdlp_tool(command + ["--", url], on_line, cancel, on_idle=preparing)
+                run_ytdlp_tool(command + inputs, on_line, cancel, on_idle=preparing)
             except Cancelled:
                 # after_move уже мог зафиксировать готовый файл перед отменой.
                 if os.path.isfile(saved_to):

@@ -187,6 +187,8 @@ class JobManager:
                 selection["stream_kind"] = job.options["stream_kind"]
             if job.options.get("cookie_browser"):
                 selection["cookie_browser"] = job.options["cookie_browser"]
+            if job.options.get('prepared_info'):
+                selection['prepared_info'] = job.options['prepared_info']
             path = self.runner(job.url, folder=self.folder, name=job.options.get("name"),
                                referer=job.options.get("referer"), progress=progress,
                                browser_headers=job.options.get("headers"),

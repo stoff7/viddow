@@ -17,6 +17,7 @@ from source_auth import is_youtube, ytdlp_auth_args
 from diagnostics import describe_error
 from media_prepare import recommended, preview_gif
 from trace_log import trace_event
+from media_tracks import probe_unknown, private_formats, group_x_sources
 
 TIMEOUT = 30
 MAX_JSON = 8 * 1024 * 1024
@@ -119,6 +120,8 @@ def inspect_source(url, options, cancel, timeout=TIMEOUT):
         if not lines:
             raise ValueError("Источник не вернул метаданные")
         info = json.loads(lines[0])
+        if stream:
+            probe_unknown(info, headers, stop)
         result = normalize(info)
         # Bounded manifest classification for explicit or automatically prepared sources.
         if stream and (options.get("stream_kind") == "HLS" or urllib.parse.urlsplit(url).path.lower().endswith(".m3u8")):
@@ -140,6 +143,7 @@ def inspect_source(url, options, cancel, timeout=TIMEOUT):
                 result["hls_kind"] = "unknown"
         download.check_cancel(stop)
         if options.get('_preview_context'):
+            result['_download_formats'] = private_formats(info, headers)
             best, _, _ = recommended(result)
             rows = info.get('formats') or [info]
             row = next((row for row in rows if str(row.get('format_id')) == best['id']), {})
@@ -189,11 +193,15 @@ class Inspector:
         except Exception as error:
             trace_event('candidate_error', analysis_tag=self._state['id'], source_tag=options.get('_trace_tag'), code=describe_error(error)[0], elapsed_ms=int((time.monotonic() - started) * 1000))
             raise
-        trace_event('candidate_done', analysis_tag=self._state['id'], source_tag=options.get('_trace_tag'), formats_count=len(result.get('formats', [])), elapsed_ms=int((time.monotonic() - started) * 1000))
+        trace_event('candidate_done', analysis_tag=self._state['id'], source_tag=options.get('_trace_tag'), formats_count=len(result.get('formats', [])),
+            video_count=sum(row['kind'] in ('video', 'combined') for row in result.get('formats', [])),
+            audio_count=sum(row['kind'] == 'audio' for row in result.get('formats', [])),
+            unknown_count=sum(row['kind'] == 'unknown' for row in result.get('formats', [])), elapsed_ms=int((time.monotonic() - started) * 1000))
         context = result.pop('_preview', None)
+        routes = result.pop('_download_formats', None)
         if options.get('stream_kind') and options.get('name'):
             result['title'] = options['name'][:512]
-        source = {'url': url, 'options': options, 'result': result, 'preview_context': context,
+        source = {'url': url, 'options': options, 'result': result, 'preview_context': context, 'download_formats': routes,
                   'preview_lock': threading.Lock(), 'preview_done': False, 'preview': None}
         return source
 
@@ -223,6 +231,7 @@ class Inspector:
                             pass  # One expired or unsupported candidate must not hide another video.
                 if not sources:
                     raise ValueError('Найденные видео пока недоступны. Откройте нужное видео на странице.')
+            sources = group_x_sources(sources)
             sources.sort(key=lambda source: (recommended(source['result'])[2], source['url']), reverse=True)
             private, public = {}, []
             for source in sources:
@@ -319,6 +328,10 @@ class Inspector:
             options = copy.deepcopy(source["options"])
             options.update(format_ids=ids, format_label=" · ".join([quality, *audio]),
                            name=options.get("name") or source["result"]["title"])
+            if source.get('download_info'):
+                selected = copy.deepcopy(source['download_info'])
+                selected['formats'] = [row for row in selected['formats'] if row['format_id'] in ids]
+                options['prepared_info'] = selected
             options.pop("_timeout", None)
             options.pop("_trace_tag", None)
             return [source["url"]], options

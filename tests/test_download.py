@@ -78,6 +78,26 @@ class RoutingTests(unittest.TestCase):
 
 
 class TransferTests(unittest.TestCase):
+    @patch('download.shutil.which', return_value='yt-dlp')
+    def test_prepared_tracks_use_private_temporary_info_without_global_headers(self, which):
+        import json
+        with tempfile.TemporaryDirectory() as folder:
+            saved = Path(folder, 'chosen.mp4'); saved.write_bytes(b'done')
+            info = {'id': 'one', 'title': 'Chosen', 'formats': [{'format_id': 'v', 'url': 'https://cdn.test/video?token=full', 'http_headers': {'Cookie': 'video'}}]}
+            paths = []
+            def finish(command, receive, cancel, **controls):
+                selected = Path(command[command.index('--load-info-json') + 1]); paths.append(selected)
+                self.assertEqual(json.loads(selected.read_text()), info)
+                self.assertEqual(selected.stat().st_mode & 0o777, 0o600)
+                self.assertNotIn('--add-headers', command)
+                self.assertNotIn('--', command)
+                self.assertIn('--no-embed-info-json', command)
+                Path(command[command.index('--print-to-file') + 2]).write_text(str(saved))
+            with patch('download.run_tool', side_effect=finish):
+                self.assertEqual(download.run_ytdlp('https://cdn.test/video', folder, 'chosen', {'Cookie': 'wrong-global'},
+                    lambda *_: None, format_ids=['v'], prepared_info=info), str(saved))
+            self.assertFalse(paths[0].exists())
+
     def test_tls_fallback_preserves_request_and_stops_after_one_retry(self):
         command = ['yt-dlp', '--impersonate', 'chrome', '--add-headers', 'Cookie:context',
                    '--', 'https://example.com/master.m3u8?token=full']
