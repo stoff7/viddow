@@ -119,7 +119,7 @@ class RegistrationInputTests(unittest.TestCase):
         import install_native_host
         with tempfile.TemporaryDirectory() as folder, patch.object(sys, "platform", "darwin"), patch.object(sys, "argv", ["install_native_host.py", "--user-data-dir", folder]), patch("install_native_host.os.chmod"), patch("builtins.print"):
             self.assertEqual(install_native_host.main(), 0)
-            manifest = json.loads(Path(folder, "NativeMessagingHosts", "local.video_downloader.json").read_text())
+            manifest = json.loads(Path(folder, "NativeMessagingHosts", "local.video_downloader.json").read_text(encoding="utf-8"))
             self.assertEqual(manifest["path"], str(Path(install_native_host.HERE, "native_host.sh")))
             expected_id = install_native_host.extension_id(str(Path(install_native_host.HERE, "extension")))
             self.assertEqual(manifest["allowed_origins"], [f"chrome-extension://{expected_id}/"])

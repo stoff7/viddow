@@ -10,8 +10,10 @@ import subprocess
 import tempfile
 import threading
 import time
+import sys
 
 REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO))
 OUT = REPO / 'dist/windows'
 SETUP = next(OUT.glob('Viddow-Setup-*.exe'))
 VERSION = json.loads((OUT / 'components.json').read_text())['version']
@@ -63,6 +65,9 @@ def main():
         run([host_exe, '--check'], env=env)
         REPORT.append('PASS: silent per-user install, Cyrillic/spaces/percent path, payload integrity, isolated tool resolution')
         run([bin_dir / 'ffmpeg.exe', '-v', 'error', '-f', 'lavfi', '-i', 'testsrc=size=160x90:rate=10', '-f', 'lavfi', '-i', 'sine=frequency=440', '-t', '2', '-c:v', 'mpeg4', '-c:a', 'aac', root / 'sample.mp4'])
+        run([bin_dir / 'ffmpeg.exe', '-v', 'error', '-i', root / 'sample.mp4', '-an', '-c:v', 'mpeg2video', '-f', 'hls', '-hls_time', '1', '-hls_playlist_type', 'vod', root / 'video.m3u8'])
+        run([bin_dir / 'ffmpeg.exe', '-v', 'error', '-i', root / 'sample.mp4', '-vn', '-c:a', 'copy', '-f', 'hls', '-hls_time', '1', '-hls_playlist_type', 'vod', root / 'audio.m3u8'])
+        (root / 'master.m3u8').write_text('#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="Test",DEFAULT=YES,AUTOSELECT=YES,URI="audio.m3u8"\n#EXT-X-STREAM-INF:BANDWIDTH=300000,RESOLUTION=160x90,AUDIO="audio"\nvideo.m3u8\n', encoding='utf-8')
         handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(root))
         server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), handler)
         threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -76,7 +81,7 @@ def main():
             assert ready['tools']['yt_dlp'] and ready['tools']['ffmpeg']
             session = ready['session']
             send(host, {'command': 'download', 'request_id': 'download', 'session': session,
-                        'url': f'http://127.0.0.1:{server.server_port}/sample.mp4', 'name': 'Проверка видео'})
+                        'urls': [f'http://127.0.0.1:{server.server_port}/sample.mp4'], 'name': 'Проверка видео'})
             reply = wait_message(messages, lambda row: row.get('request_id') == 'download')
             assert reply['ok'], reply
             done = wait_message(messages, lambda row: any(job['status'] in ('done', 'error') for job in row.get('jobs', [])))
@@ -86,6 +91,18 @@ def main():
             probe = json.loads(subprocess.check_output([bin_dir / 'ffprobe.exe', '-v', 'error', '-show_streams', '-of', 'json', saved]))
             assert {'video', 'audio'} <= {row['codec_type'] for row in probe['streams']}
             REPORT.append('PASS: installed native stdio ready/session v2/history v1/reply/state, MP4 with video+audio')
+            send(host, {'command': 'download', 'request_id': 'hls', 'session': session,
+                        'urls': [f'http://127.0.0.1:{server.server_port}/master.m3u8'], 'name': 'Раздельные дорожки'})
+            reply = wait_message(messages, lambda row: row.get('request_id') == 'hls')
+            assert reply['ok'], reply
+            hls_id = reply['result']['ids'][0]
+            done = wait_message(messages, lambda row: any(job['id'] == hls_id and job['status'] in ('done', 'error') for job in row.get('jobs', [])))
+            hls_job = next(job for job in done['jobs'] if job['id'] == hls_id)
+            assert hls_job['status'] == 'done', hls_job
+            probe = json.loads(subprocess.check_output([bin_dir / 'ffprobe.exe', '-v', 'error', '-show_streams', '-show_format', '-of', 'json', hls_job['path']]))
+            assert {'video', 'audio'} <= {row['codec_type'] for row in probe['streams']}
+            assert 1.5 < float(probe['format']['duration']) < 3
+            REPORT.append('PASS: installed yt-dlp downloads HLS separate audio/video and bundled ffmpeg muxes; ffprobe validates tracks and duration')
         finally:
             host.stdin.close()
             host.wait(timeout=15)

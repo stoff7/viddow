@@ -140,9 +140,9 @@ class NativeSessionTests(unittest.TestCase):
             "download.DEFAULT_DIR=sys.argv[1]; "
             "download.download=functools.partial(download.download,folder=sys.argv[1]); "
             "import native_host; "
-            "\nwith patch('native_host.subprocess') as desktop:"
+            "\nwith patch('platform_support.reveal_file') as desktop:"
             "\n native_host.main()"
-            "\n if desktop.run.called: assert desktop.run.call_args.args[0] == ['open','-R',os.path.realpath(sys.argv[2])]"
+            "\n if desktop.called: assert desktop.call_args.args[0] == os.path.realpath(sys.argv[2])"
         )
 
         def single(message, expected, saved=""):

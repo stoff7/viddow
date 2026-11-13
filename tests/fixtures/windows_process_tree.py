@@ -19,7 +19,10 @@ if mode == "leaf":
 elif mode == "parent":
     subprocess.Popen([sys.executable, __file__, "leaf", str(directory)], close_fds=True)
 elif mode in ("controller", "nested"):
-    from prototypes.windows_job import JobProcess
+    if os.environ.get('VIDDOW_TEST_JOB_IMPLEMENTATION') == 'production':
+        from windows_process import JobProcess
+    else:
+        from prototypes.windows_job import JobProcess
     owner = JobProcess([sys.executable, __file__, "parent", str(directory)])
     try:
         owner.wait()

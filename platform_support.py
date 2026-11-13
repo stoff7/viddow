@@ -109,6 +109,11 @@ def reveal_file(path):
     import subprocess
     if sys.platform == "win32":
         # Shell API takes the path as data, avoiding Explorer command-line parsing.
+        ole = ctypes.WinDLL("ole32")
+        ole.CoInitializeEx.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+        ole.CoInitializeEx.restype = ctypes.c_long
+        ole.CoUninitialize.argtypes = []
+        initialized = ole.CoInitializeEx(None, 2)
         shell = ctypes.WinDLL("shell32", use_last_error=True)
         shell.ILCreateFromPathW.argtypes = [ctypes.c_wchar_p]
         shell.ILCreateFromPathW.restype = ctypes.c_void_p
@@ -117,6 +122,8 @@ def reveal_file(path):
         shell.ILFree.argtypes = [ctypes.c_void_p]
         item = shell.ILCreateFromPathW(os.path.abspath(path))
         if not item:
+            if initialized >= 0:
+                ole.CoUninitialize()
             raise OSError("Не удалось найти файл в Explorer")
         try:
             result = shell.SHOpenFolderAndSelectItems(item, 0, None, 0)
@@ -124,6 +131,8 @@ def reveal_file(path):
                 raise OSError(f"Не удалось открыть Explorer (HRESULT {result:#x})")
         finally:
             shell.ILFree(item)
+            if initialized >= 0:
+                ole.CoUninitialize()
     else:
         subprocess.run(["open", "-R", path], check=True, timeout=10)
 
