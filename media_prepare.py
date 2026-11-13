@@ -1,7 +1,7 @@
 """Bounded recommendation and first-frames preview; no queue or persistent storage."""
 import base64
 import os
-import shutil
+from platform_support import resolve_tool
 import tempfile
 import time
 
@@ -13,7 +13,7 @@ MAX_PREVIEW = 128 * 1024
 
 
 def recommended(result, ffmpeg=None):
-    ffmpeg = bool(shutil.which('ffmpeg')) if ffmpeg is None else ffmpeg
+    ffmpeg = bool(resolve_tool('ffmpeg')) if ffmpeg is None else ffmpeg
     formats = result['formats']
     audio = [row for row in formats if row['kind'] == 'audio']
     main = [row for row in formats if row['kind'] != 'audio'] or audio
@@ -40,7 +40,7 @@ def recommended(result, ffmpeg=None):
 
 def preview_gif(context, cancel):
     """Read a short beginning, never the whole download; cap time, frames and output."""
-    executable = shutil.which('ffmpeg')
+    executable = resolve_tool('ffmpeg')
     if not executable or not context:
         return None
     deadline = time.monotonic() + 8

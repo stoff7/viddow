@@ -12,3 +12,4 @@ urls.txt
 
 # Redacted local runtime diagnostics.
 logs/
+windows-native/

@@ -24,7 +24,7 @@ class Response(io.BytesIO):
 
 class RoutingTests(unittest.TestCase):
     @patch("download.run_ytdlp", return_value="selected.mp4")
-    @patch("download.shutil.which", side_effect=lambda tool: None if tool == "ffmpeg" else "yt-dlp")
+    @patch("download.resolve_tool", side_effect=lambda tool: None if tool == "ffmpeg" else "yt-dlp")
     @patch("download.urllib.request.urlopen")
     def test_selected_formats_require_merger_and_never_fall_back(self, urlopen, which, ytdlp):
         with self.assertRaisesRegex(RuntimeError, "ffmpeg"):
@@ -34,7 +34,7 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(ytdlp.call_args.kwargs["format_ids"], ["v90"])
         urlopen.assert_not_called()
 
-    @patch("download.shutil.which", return_value=None)
+    @patch("download.resolve_tool", return_value=None)
     def test_missing_tools_explain_installation_without_creating_files(self, which):
         with tempfile.TemporaryDirectory() as folder:
             with self.assertRaisesRegex(RuntimeError, "brew install yt-dlp"):
@@ -44,7 +44,7 @@ class RoutingTests(unittest.TestCase):
             self.assertEqual(list(Path(folder).iterdir()), [])
 
     @patch("download.run_ytdlp", return_value="saved.mp4")
-    @patch("download.shutil.which", return_value="yt-dlp")
+    @patch("download.resolve_tool", return_value="yt-dlp")
     @patch("download.urllib.request.urlopen")
     def test_explicit_page_skips_probe_and_keeps_headers(self, urlopen, which, ytdlp):
         result = download.download("https://example.com/watch", source_kind="page",
@@ -55,7 +55,7 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(ytdlp.call_args.args[3], {"Cookie": "session", "User-Agent": "browser", "Referer": "https://example.com/"})
 
     @patch("download.run_ytdlp", return_value="saved.mp4")
-    @patch("download.shutil.which", return_value="yt-dlp")
+    @patch("download.resolve_tool", return_value="yt-dlp")
     @patch("download.urllib.request.urlopen")
     def test_blocked_page_falls_back_but_direct_error_does_not(self, urlopen, which, ytdlp):
         def denied(*args, **kwargs):
@@ -68,7 +68,7 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(ytdlp.call_count, 1)
 
     @patch("download.run_ytdlp", return_value="saved.mp4")
-    @patch("download.shutil.which", return_value="yt-dlp")
+    @patch("download.resolve_tool", return_value="yt-dlp")
     @patch("download.urllib.request.urlopen")
     def test_html_and_xhtml_are_pages(self, urlopen, which, ytdlp):
         for content_type in ("text/html", "application/xhtml+xml"):
@@ -78,7 +78,7 @@ class RoutingTests(unittest.TestCase):
 
 
 class TransferTests(unittest.TestCase):
-    @patch('download.shutil.which', return_value='yt-dlp')
+    @patch('download.resolve_tool', return_value='yt-dlp')
     def test_prepared_tracks_use_private_temporary_info_without_global_headers(self, which):
         import json
         with tempfile.TemporaryDirectory() as folder:
@@ -104,7 +104,9 @@ class TransferTests(unittest.TestCase):
         with patch('download.run_tool', side_effect=[RuntimeError('curl: (35) SSL_connect'), None]) as run:
             download.run_ytdlp_tool(command, lambda _: None)
         self.assertEqual(run.call_count, 2)
-        self.assertEqual(run.call_args.args[0], command[:1] + command[3:])
+        first_command = run.call_args_list[0].args[0]
+        index = first_command.index('--impersonate')
+        self.assertEqual(run.call_args.args[0], first_command[:index] + first_command[index + 2:])
         with patch('download.run_tool', side_effect=RuntimeError('curl: (35) SSL_connect')) as run:
             with self.assertRaises(RuntimeError):
                 download.run_ytdlp_tool(command, lambda _: None)
@@ -121,7 +123,7 @@ class TransferTests(unittest.TestCase):
                     download.run_ytdlp_tool(command, lambda _: None)
                 self.assertEqual(run.call_count, 1)
 
-    @patch("download.shutil.which", return_value="yt-dlp")
+    @patch("download.resolve_tool", return_value="yt-dlp")
     def test_explicit_ids_become_literal_filters_and_no_quality_fallback(self, which):
         with tempfile.TemporaryDirectory() as folder:
             saved = Path(folder, "selected.mp4")
@@ -193,7 +195,7 @@ class TransferTests(unittest.TestCase):
             with self.assertRaises(ProcessLookupError):
                 os.kill(pid, 0)
 
-    @patch("download.shutil.which", return_value="ffmpeg")
+    @patch("download.resolve_tool", return_value="ffmpeg")
     @patch("download.stream_duration", side_effect=download.Cancelled)
     def test_cancel_during_probe_removes_reservation(self, duration, which):
         with tempfile.TemporaryDirectory() as folder:
@@ -201,7 +203,7 @@ class TransferTests(unittest.TestCase):
                 download.download_stream_ffmpeg("https://example.com/master.m3u8", folder, "video", {}, lambda *_: None)
             self.assertEqual(list(Path(folder).iterdir()), [])
 
-    @patch("download.shutil.which", return_value="yt-dlp")
+    @patch("download.resolve_tool", return_value="yt-dlp")
     @patch("download.run_tool", side_effect=download.Cancelled)
     def test_cancel_ytdlp_removes_reservation(self, tool, which):
         with tempfile.TemporaryDirectory() as folder:
@@ -209,7 +211,7 @@ class TransferTests(unittest.TestCase):
                 download.run_ytdlp("https://example.com/watch", folder, "video", {}, lambda *_: None)
             self.assertEqual(list(Path(folder).iterdir()), [])
 
-    @patch("download.shutil.which", return_value="yt-dlp")
+    @patch("download.resolve_tool", return_value="yt-dlp")
     def test_ytdlp_completed_file_survives_late_cancel(self, which):
         with tempfile.TemporaryDirectory() as folder:
             completed = Path(folder, "video.mp4")

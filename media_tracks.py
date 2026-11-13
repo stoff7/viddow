@@ -2,7 +2,7 @@
 import copy
 import json
 import re
-import shutil
+from platform_support import resolve_tool
 import time
 import urllib.parse
 import uuid
@@ -23,7 +23,7 @@ def probe_unknown(info, headers, cancel):
     rows = info.get('formats') or [info]
     if len(rows) != 1 or (rows[0].get('vcodec') is not None and rows[0].get('acodec') is not None) or not valid_url(rows[0].get('url')):
         return
-    executable = shutil.which('ffprobe')
+    executable = resolve_tool('ffprobe')
     if not executable:
         return
     lines = []

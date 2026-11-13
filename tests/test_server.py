@@ -139,7 +139,7 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(self.manager.snapshots(), [])
 
     @patch("download.run_ytdlp", return_value="/tmp/fallback.mp4")
-    @patch("download.shutil.which", return_value="yt-dlp")
+    @patch("download.resolve_tool", return_value="yt-dlp")
     def test_real_http_403_reaches_extractor(self, which, ytdlp):
         self.assertEqual(download.download(self.source_url + "/denied"), "/tmp/fallback.mp4")
         ytdlp.assert_called_once()

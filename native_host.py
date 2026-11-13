@@ -33,7 +33,9 @@ import time
 import urllib.parse
 
 import download
+import native_protocol
 
+native_protocol.configure_stdio()
 OUT = sys.stdout.buffer
 sys.stdout = sys.stderr  # stdout — канал сообщений: случайный print сломал бы протокол
 SEND_EVERY = 0.25  # с; чаще слать прогресс незачем
@@ -42,13 +44,7 @@ cancelled = threading.Event()
 
 
 def read_message():
-    header = sys.stdin.buffer.read(4)
-    if len(header) < 4:
-        return None
-    (length,) = struct.unpack("<I", header)
-    if not 0 < length <= 1024 * 1024:
-        raise ValueError("Сообщение слишком большое")
-    return json.loads(sys.stdin.buffer.read(length))
+    return native_protocol.read_message(sys.stdin.buffer)
 
 
 def send(message):

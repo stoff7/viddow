@@ -3,7 +3,7 @@
 import argparse
 import json
 import re
-import shutil
+from platform_support import tool_status
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -51,8 +51,7 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/fetch":
             return self.fetch(urllib.parse.parse_qs(parsed.query).get("url", [""])[0])
         if parsed.path == "/health":
-            return self.json_reply(200, {"tools": {"yt_dlp": bool(shutil.which("yt-dlp")),
-                                                    "ffmpeg": bool(shutil.which("ffmpeg"))},
+            return self.json_reply(200, {"tools": tool_status(),
                                          "output_dir": self.server.jobs.folder,
                                          "workers": self.server.jobs.workers})
         if parsed.path == "/jobs":

@@ -18,7 +18,7 @@ from source_auth import cookie_browser_from, ytdlp_auth_args
 
 
 class SourceAuthTests(unittest.TestCase):
-    @patch('download.shutil.which', return_value='yt-dlp')
+    @patch('download.resolve_tool', return_value='yt-dlp')
     def test_preparation_reports_elapsed_time_and_stops_after_first_bytes(self, which):
         updates = []
         with tempfile.TemporaryDirectory() as folder:
@@ -42,7 +42,7 @@ class SourceAuthTests(unittest.TestCase):
             download.run_tool([sys.executable, '-c', 'import time; time.sleep(10)'], lambda _: None, on_idle=fail)
         self.assertLess(time.monotonic() - start, 3)
 
-    @patch('source_auth.shutil.which', return_value=None)
+    @patch('source_auth.resolve_tool', return_value=None)
     def test_browser_session_is_explicit_scoped_and_never_exports_cookie_file(self, which):
         self.assertEqual(ytdlp_auth_args('https://www.youtube.com/watch?v=test'), [])
         args = ytdlp_auth_args('https://www.youtube.com/watch?v=test', 'vivaldi')
@@ -54,12 +54,12 @@ class SourceAuthTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 cookie_browser_from(value)
 
-    @patch('source_auth.shutil.which', side_effect=lambda tool: '/usr/local/bin/node' if tool == 'node' else None)
+    @patch('source_auth.resolve_tool', side_effect=lambda tool: '/usr/local/bin/node' if tool == 'node' else None)
     def test_available_node_is_enabled_for_youtube_only(self, which):
-        self.assertEqual(ytdlp_auth_args('https://youtu.be/test'), ['--js-runtimes', 'node'])
+        self.assertEqual(ytdlp_auth_args('https://youtu.be/test'), ['--no-js-runtimes', '--js-runtimes', 'node:/usr/local/bin/node'])
         self.assertEqual(ytdlp_auth_args('https://example.com/watch'), [])
 
-    @patch('download.shutil.which', return_value='yt-dlp')
+    @patch('download.resolve_tool', return_value='yt-dlp')
     @patch('download.run_ytdlp', return_value='/tmp/video.mp4')
     def test_download_and_selected_formats_propagate_explicit_session(self, tool, which):
         url = 'https://www.youtube.com/watch?v=test'
@@ -69,7 +69,7 @@ class SourceAuthTests(unittest.TestCase):
         self.assertEqual(tool.call_args.kwargs['cookie_browser'], 'vivaldi')
         self.assertEqual(tool.call_args.kwargs['format_ids'], ['137', '140'])
 
-    @patch('inspector.shutil.which', return_value='yt-dlp')
+    @patch('inspector.resolve_tool', return_value='yt-dlp')
     def test_analysis_uses_session_but_never_returns_it_in_metadata(self, which):
         def inspect(command, collect, cancel, **limits):
             self.assertEqual(command[command.index('--cookies-from-browser') + 1], 'vivaldi')

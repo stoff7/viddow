@@ -4,7 +4,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import math
 import re
-import shutil
+from platform_support import resolve_tool
 import threading
 import time
 import urllib.parse
@@ -85,7 +85,7 @@ def normalize(info):
 
 
 def inspect_source(url, options, cancel, timeout=TIMEOUT):
-    executable = shutil.which("yt-dlp")
+    executable = resolve_tool("yt-dlp")
     if not executable:
         raise RuntimeError("Для анализа нужен yt-dlp: brew install yt-dlp")
     timeout = options.get("_timeout", timeout)
@@ -318,7 +318,7 @@ class Inspector:
             if len(ids) > 1:
                 if chosen[0]["kind"] != "video" or any(item["kind"] != "audio" for item in chosen[1:]):
                     raise ValueError("Отдельный звук можно добавить только к видео без звука")
-                if not shutil.which("ffmpeg"):
+                if not resolve_tool("ffmpeg"):
                     raise ValueError("Для объединения видео и звука нужен ffmpeg: brew install ffmpeg")
             first = chosen[0]
             quality = "Только звук" if first["kind"] == "audio" else f"{first['height']}p" if first.get("height") else first["id"]

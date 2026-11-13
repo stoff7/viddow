@@ -50,7 +50,7 @@ class InspectorTests(unittest.TestCase):
         self.assertEqual(hls_kind('<html>master.m3u8</html>'), 'unknown')
         self.assertEqual(hls_kind('#EXTM3U'), 'unknown')
 
-    @patch('inspector.shutil.which', return_value='yt-dlp')
+    @patch('inspector.resolve_tool', return_value='yt-dlp')
     @patch('inspector.urllib.request.urlopen')
     def test_captured_content_type_analyzes_hls_without_filename_extension(self, request, which):
         request.return_value = io.BytesIO(b'#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=100\nmedia.m3u8')
@@ -87,13 +87,13 @@ class InspectorTests(unittest.TestCase):
         identifier = inspector.start('https://example.com/master.m3u8?token=full', headers=headers)['analysis_id']
         headers['Cookie'] = 'changed'
         wait_for(lambda: inspector.snapshot()['status'] == 'done')
-        with patch('inspector.shutil.which', return_value='ffmpeg'):
+        with patch('inspector.resolve_tool', return_value='ffmpeg'):
             urls, options = inspector.selection(identifier, ['v90', 'ru', 'en'])
             self.assertEqual(urls, ['https://example.com/master.m3u8?token=full'])
             self.assertEqual(options['headers'], {'Cookie': 'original'})
             self.assertEqual(options['format_ids'], ['v90', 'ru', 'en'])
             self.assertEqual(options['format_label'], '90p · ru · en')
-        with patch('inspector.shutil.which', return_value=None), self.assertRaisesRegex(ValueError, 'ffmpeg'):
+        with patch('inspector.resolve_tool', return_value=None), self.assertRaisesRegex(ValueError, 'ffmpeg'):
             inspector.selection(identifier, ['v90', 'ru'])
         for ids in (['not-observed'], ['mux', 'ru'], ['ru', 'en'], ['v90', 'v180']):
             with self.subTest(ids=ids), self.assertRaises(ValueError):
@@ -104,7 +104,7 @@ class InspectorTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             inspector.selection(identifier, ['v90'])
 
-    @patch('inspector.shutil.which', return_value=sys.executable)
+    @patch('inspector.resolve_tool', return_value=sys.executable)
     def test_metadata_timeout_and_cancel_stop_real_subprocess(self, which):
         real_run = download.run_tool
         for timed_out in (True, False):
@@ -291,7 +291,7 @@ class InspectorTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             inspector.preview(identifier, source_id)
 
-    @patch('inspector.shutil.which', return_value=None)
+    @patch('inspector.resolve_tool', return_value=None)
     @patch('inspector.urllib.request.urlopen')
     def test_missing_extractor_does_not_contact_source(self, request, which):
         with self.assertRaisesRegex(RuntimeError, 'brew install yt-dlp'):

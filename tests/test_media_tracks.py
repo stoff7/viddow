@@ -34,7 +34,7 @@ class MediaTracksTests(unittest.TestCase):
                 self.assertIn('Cookie: private\r\n', command)
                 self.assertEqual(command[command.index('-probesize') + 1], '1048576')
                 receive(json.dumps({'streams': [{'codec_type': kind, 'codec_name': 'h264' if kind == 'video' else 'aac', 'width': 1280, 'height': 720}]}))
-            with patch('media_tracks.shutil.which', return_value='ffprobe'), patch('media_tracks.download.run_tool', side_effect=run):
+            with patch('media_tracks.resolve_tool', return_value='ffprobe'), patch('media_tracks.download.run_tool', side_effect=run):
                 probe_unknown(info, {'Cookie': 'private'}, threading.Event())
             self.assertEqual(normalize(info)['formats'][0]['kind'], kind)
 

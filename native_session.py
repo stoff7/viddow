@@ -1,7 +1,7 @@
 """Одна очередь для всех вкладок расширения через постоянный Native Messaging-канал."""
 import os
 from concurrent.futures import ThreadPoolExecutor
-import shutil
+from platform_support import tool_status
 import subprocess
 import threading
 import uuid
@@ -49,7 +49,7 @@ class Session:
         return {"type": "state", "session": self.id, "jobs": self.manager.snapshots(),
                 "history_version": 1,
                 "settings": {"workers": self.manager.workers, "output_dir": self.manager.folder, "youtube_browser": self.youtube_browser},
-                "tools": {"yt_dlp": bool(shutil.which("yt-dlp")), "ffmpeg": bool(shutil.which("ffmpeg"))},
+                "tools": tool_status(),
                 "analysis": self.inspector.snapshot()}
 
     def handle(self, message):

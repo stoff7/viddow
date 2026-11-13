@@ -20,7 +20,6 @@ import itertools
 import json
 import os
 import re
-import shutil
 import signal
 import subprocess
 import sys
@@ -31,6 +30,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from source_auth import is_youtube, ytdlp_auth_args
+from platform_support import resolve_tool, move_file_no_replace, tool_environment, ytdlp_dependency_args
 from macos_metadata import complete_download_metadata
 from email.message import Message
 
@@ -170,6 +170,24 @@ def remove_part(part):
         os.remove(part)
 
 
+def finalize_file(part, path, cancel=None):
+    """A late conflict gets another reserved name; never replace a finished file."""
+    target = path
+    try:
+        while True:
+            check_cancel(cancel)
+            try:
+                move_file_no_replace(part, target)
+                return target
+            except FileExistsError:
+                if target != path:
+                    remove_part(target + ".part")
+                target = reserve(os.path.dirname(path), os.path.basename(path))
+    finally:
+        if target != path:
+            remove_part(target + ".part")
+
+
 def stop_process(process):
     """Останавливаем только собственный процесс и его группу, включая ffmpeg из yt-dlp."""
     def send(sig):
@@ -197,8 +215,10 @@ def run_tool(command, on_line, cancel=None, max_line_chars=None, on_idle=None):
     started = time.monotonic()
     tool = os.path.basename(command[0])
     trace_event("process_start", tool=tool)
-    with tempfile.TemporaryFile("w+") as errors:
+    with tempfile.TemporaryFile("w+", encoding="utf-8", errors="replace") as errors:
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=errors, text=True,
+                                   encoding="utf-8",
+                                   stdin=subprocess.DEVNULL, env=tool_environment(),
                                    start_new_session=os.name == "posix")
         finished = threading.Event()
         watcher_errors = []
@@ -247,6 +267,7 @@ def run_tool(command, on_line, cancel=None, max_line_chars=None, on_idle=None):
 
 def run_ytdlp_tool(command, on_line, cancel=None, **controls):
     """One ordinary-TLS fallback for an impersonation handshake failure before output."""
+    command = [command[0], *ytdlp_dependency_args(), *command[1:]]
     received_output = False
 
     def receive(line):
@@ -292,9 +313,9 @@ def download(url, folder=DEFAULT_DIR, name=None, referer=None, progress=draw, br
     if format_ids:
         from contracts import format_ids_from
         format_ids = format_ids_from(format_ids)
-        if not shutil.which("yt-dlp"):
+        if not resolve_tool("yt-dlp"):
             raise RuntimeError("Для выбора качества нужен yt-dlp: brew install yt-dlp")
-        if len(format_ids) > 1 and not shutil.which("ffmpeg"):
+        if len(format_ids) > 1 and not resolve_tool("ffmpeg"):
             raise RuntimeError("Для объединения видео и звука нужен ffmpeg: brew install ffmpeg")
         headers = request_headers(referer, browser_headers) if source_kind != "page" and not is_youtube(url) else {
             **({"Referer": referer} if referer else {}), **(browser_headers or {})}
@@ -315,7 +336,7 @@ def download(url, folder=DEFAULT_DIR, name=None, referer=None, progress=draw, br
         error.close()
         check_cancel(cancel)
         if (source_kind == "auto" and error.code in (401, 403, 405, 429)
-                and not url_path.endswith(FILE_EXT) and shutil.which("yt-dlp")):
+                and not url_path.endswith(FILE_EXT) and resolve_tool("yt-dlp")):
             return download_page(url, folder, name, referer, progress, browser_headers, cancel, cookie_browser)
         raise
     with response:
@@ -353,7 +374,7 @@ def save(response, folder, name, progress, cancel=None):
         check_cancel(cancel)
         if total and done != total:
             raise RuntimeError("Соединение прервалось: файл получен не полностью")
-        os.replace(part, path)
+        path = finalize_file(part, path, cancel)
     except BaseException:
         remove_part(part)
         raise
@@ -363,7 +384,7 @@ def save(response, folder, name, progress, cancel=None):
 
 def stream_duration(url, headers, cancel=None):
     """Длительность потока в секундах — чтобы считать проценты. У трансляций её нет."""
-    ffprobe = shutil.which("ffprobe")
+    ffprobe = resolve_tool("ffprobe")
     if not ffprobe:
         return None
     lines = []
@@ -379,7 +400,7 @@ def download_stream(url, folder, name, headers, progress, cancel=None):
     """HLS/DASH: yt-dlp качает кусочки параллельно (быстро), без него — ffmpeg по одному (медленно)."""
     # имя из адреса бывает длинным токеном — обрезаем
     name = name or os.path.splitext(urllib.parse.unquote(os.path.basename(urllib.parse.urlparse(url).path)))[0][:80]
-    if shutil.which("yt-dlp"):
+    if resolve_tool("yt-dlp"):
         return run_ytdlp(url, folder, name, headers, progress, stream=True, cancel=cancel)
     return download_stream_ffmpeg(url, folder, name, headers, progress, cancel)
 
@@ -387,7 +408,7 @@ def download_stream(url, folder, name, headers, progress, cancel=None):
 def download_stream_ffmpeg(url, folder, name, headers, progress, cancel=None):
     """ffmpeg сам берёт лучшее качество и склеивает кусочки в MP4, но качает их по одному
     и берёт только одну звуковую дорожку."""
-    ffmpeg = shutil.which("ffmpeg")
+    ffmpeg = resolve_tool("ffmpeg")
     if not ffmpeg:
         raise RuntimeError("для HLS/DASH нужен yt-dlp или ffmpeg: brew install yt-dlp ffmpeg")
     path = reserve(folder, clean_name(name) + ".mp4")
@@ -420,7 +441,7 @@ def download_stream_ffmpeg(url, folder, name, headers, progress, cancel=None):
                   "-progress", "pipe:1", "-rw_timeout", "30000000", "-headers", headers, "-i", url,
                   "-c", "copy", "-f", "mp4", part], on_line, cancel)
         check_cancel(cancel)
-        os.replace(part, path)
+        path = finalize_file(part, path, cancel)
     except BaseException:
         remove_part(part)
         raise
@@ -430,7 +451,7 @@ def download_stream_ffmpeg(url, folder, name, headers, progress, cancel=None):
 
 def download_page(url, folder, name, referer, progress, browser_headers=None, cancel=None, cookie_browser="none"):
     """Страница с плеером: видео не лежит по ссылке, его находит yt-dlp."""
-    if not shutil.which("yt-dlp"):
+    if not resolve_tool("yt-dlp"):
         raise RuntimeError("это страница, а не файл — для неё нужен yt-dlp: brew install yt-dlp")
     # Не навязываем наш User-Agent, но сохраняем явно переданный браузерный контекст.
     headers = {"Referer": referer} if referer else {}
@@ -449,6 +470,11 @@ def run_ytdlp(url, folder, name, headers, progress, stream=False, cancel=None, f
     Для страниц (YouTube и т.п.) не включаем: там десятки аудиоформатов одного языка,
     а клиента под сайт yt-dlp подбирает сам.
     """
+    executable = resolve_tool("yt-dlp")
+    if not executable:
+        raise RuntimeError("Для загрузки нужен yt-dlp: brew install yt-dlp")
+    auth_args = ytdlp_auth_args(url, cookie_browser)
+    ffmpeg = resolve_tool("ffmpeg") if format_ids else None
     path = reserve(folder, clean_name(name), any_ext=True) if name else None
     # % в шаблоне yt-dlp — подстановка, поэтому в своём имени его удваиваем
     template = (os.path.basename(path).replace("%", "%%") if path else "%(title)s") + ".%(ext)s"
@@ -481,7 +507,7 @@ def run_ytdlp(url, folder, name, headers, progress, stream=False, cancel=None, f
     with tempfile.TemporaryDirectory() as tmp:
         # stdout занят строками прогресса — итоговый путь yt-dlp пишет в файл
         saved_to = os.path.join(tmp, "path")
-        command = [shutil.which("yt-dlp"), "--no-playlist", "--no-overwrites", "--quiet", "--progress", "--newline",
+        command = [executable, "--no-playlist", "--no-overwrites", "--quiet", "--progress", "--newline",
                    "--socket-timeout", "30",
                    "--retries", "1", "--fragment-retries", "2", "--extractor-retries", "1",
                    "--retry-sleep", "http:2", "--retry-sleep", "fragment:1", "--abort-on-unavailable-fragments",
@@ -495,11 +521,11 @@ def run_ytdlp(url, folder, name, headers, progress, stream=False, cancel=None, f
                    # она удаляется вместе с tmp, даже если загрузка упала
                    "-P", folder, "-P", f"temp:{tmp}",
                    "-o", template, "--print-to-file", "after_move:filepath", saved_to]
-        command += ytdlp_auth_args(url, cookie_browser)
+        command += auth_args
         if format_ids:
             command += ["--ignore-config", "-f", "+".join(f"all[format_id='{identifier}']" for identifier in format_ids),
                         "--audio-multistreams"]
-            if shutil.which("ffmpeg"):
+            if ffmpeg:
                 # Нужны языковые метки, но не сырой infojson с URL/заголовками.
                 command += ["--embed-metadata", "--no-embed-info-json", "--no-embed-chapters"]
         elif stream:

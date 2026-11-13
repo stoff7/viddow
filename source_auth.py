@@ -1,5 +1,5 @@
 """Явно выбранный сеанс только для YouTube. Cookie-файлы не экспортируются."""
-import shutil
+from platform_support import resolve_tool
 import urllib.parse
 
 COOKIE_BROWSERS = {"none", "vivaldi", "chrome", "chromium", "firefox", "edge", "brave", "safari", "opera"}
@@ -21,8 +21,10 @@ def ytdlp_auth_args(url, cookie_browser="none"):
     if not is_youtube(url):
         return []
     args = []
-    if not shutil.which("deno") and shutil.which("node"):
-        args += ["--js-runtimes", "node"]
+    deno = resolve_tool("deno")
+    node = None if deno else resolve_tool("node")
+    if deno or node:
+        args += ["--no-js-runtimes", "--js-runtimes", f"deno:{deno}" if deno else f"node:{node}"]
     if cookie_browser != "none":
         # --no-cookies отменяет экспорт из внешнего config. Jar живёт в yt-dlp,
         # домены cookies обрабатывает его штатный cookie jar.
