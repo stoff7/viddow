@@ -13,6 +13,7 @@
 чтобы качать со страницы video-links.html: прогресс отдаётся через колбэк progress.
 """
 from trace_log import trace_event
+from download_runtime import CURRENT, measured, observed_bytes, finishing, fragments
 
 import argparse
 import glob
@@ -43,7 +44,6 @@ USER_AGENT = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.3
 STREAM_EXT = (".m3u8", ".mpd")
 # application/vnd.apple.mpegurl, application/x-mpegURL, application/dash+xml
 STREAM_TYPES = ("mpegurl", "dash")
-CONCURRENT_FRAGMENTS = 16
 FILE_EXT = (".mp4", ".webm", ".mkv", ".mov", ".avi", ".m4v", ".mp3", ".m4a", ".wav",
             ".ogg", ".zip", ".pdf", ".gz", ".tar", ".7z", ".ts")
 
@@ -213,8 +213,10 @@ def run_tool(command, on_line, cancel=None, max_line_chars=None, on_idle=None):
     """Запускает ffmpeg/yt-dlp: stdout построчно в on_line, при ошибке — последняя строка stderr."""
     check_cancel(cancel)
     started = time.monotonic()
-    tool = os.path.basename(command[0])
-    trace_event("process_start", tool=tool)
+    tool = os.path.basename(command[0]).removesuffix('.exe')
+    attempt = CURRENT.get()
+    tags = {'attempt_tag': attempt.attempt_tag, 'run_tag': attempt.run_tag} if attempt else {}
+    trace_event("process_start", tool=tool, **tags)
     with tempfile.TemporaryFile("w+", encoding="utf-8", errors="replace") as errors:
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=errors, text=True,
                                    encoding="utf-8",
@@ -253,7 +255,7 @@ def run_tool(command, on_line, cancel=None, max_line_chars=None, on_idle=None):
             if process.poll() is None:
                 stop_process(process)
             process.stdout.close()
-            trace_event("process_done" if process.returncode == 0 else "process_error", tool=tool, elapsed_ms=int((time.monotonic() - started) * 1000))
+            trace_event("process_done" if process.returncode == 0 else "process_error", tool=tool, elapsed_ms=int((time.monotonic() - started) * 1000), **tags)
 
         check_cancel(cancel)
         if watcher_errors:
@@ -272,6 +274,11 @@ def run_ytdlp_tool(command, on_line, cancel=None, **controls):
 
     def receive(line):
         nonlocal received_output
+        if line.startswith('['):
+            return  # yt-dlp informational output is neither bytes nor metadata.
+        if line.startswith('VIDDOW_POSTPROCESS '):
+            on_line(line)
+            return
         received_output = True
         on_line(line)
 
@@ -298,6 +305,7 @@ def request_headers(referer, browser_headers):
     return headers
 
 
+@measured
 def download(url, folder=DEFAULT_DIR, name=None, referer=None, progress=draw, browser_headers=None,
              page_url=None, cancel=None, source_kind="auto", format_ids=None, stream_kind=None, cookie_browser="none", prepared_info=None):
     """Смотрит, что отдал сервер, и выбирает способ — как расширения по заголовкам ответа.
@@ -328,6 +336,12 @@ def download(url, folder=DEFAULT_DIR, name=None, referer=None, progress=draw, br
     url_path = urllib.parse.urlparse(url).path.lower()
     if source_kind == "auto" and (stream_kind or url_path.endswith(STREAM_EXT)):
         return download_stream(url, folder, name, headers, progress, cancel)
+    if source_kind == 'direct' or url_path.endswith(FILE_EXT):
+        from download_recovery import download_direct, NeedsRouting
+        try:
+            return download_direct(url, folder, name, headers, progress, cancel, auto=source_kind == 'auto')
+        except NeedsRouting:
+            pass  # Preserve content-type routing even for a misleading .mp4 suffix.
 
     request = urllib.request.Request(url, headers=headers)
     try:
@@ -370,10 +384,12 @@ def save(response, folder, name, progress, cancel=None):
                 check_cancel(cancel)
                 f.write(chunk)
                 done += len(chunk)
+                observed_bytes(done)
                 progress(done / total if total else None, megabytes(done, total))
         check_cancel(cancel)
         if total and done != total:
             raise RuntimeError("Соединение прервалось: файл получен не полностью")
+        finishing()
         path = finalize_file(part, path, cancel)
     except BaseException:
         remove_part(part)
@@ -475,6 +491,9 @@ def run_ytdlp(url, folder, name, headers, progress, stream=False, cancel=None, f
         raise RuntimeError("Для загрузки нужен yt-dlp: brew install yt-dlp")
     auth_args = ytdlp_auth_args(url, cookie_browser)
     ffmpeg = resolve_tool("ffmpeg") if format_ids else None
+    location = os.environ.get('VIDDOW_TEMP_LOCATION', 'system')
+    if location not in ('system', 'destination'):
+        raise ValueError('VIDDOW_TEMP_LOCATION: требуется system или destination')
     path = reserve(folder, clean_name(name), any_ext=True) if name else None
     # % в шаблоне yt-dlp — подстановка, поэтому в своём имени его удваиваем
     template = (os.path.basename(path).replace("%", "%%") if path else "%(title)s") + ".%(ext)s"
@@ -482,40 +501,62 @@ def run_ytdlp(url, folder, name, headers, progress, stream=False, cancel=None, f
     progress_lock = threading.Lock()
     preparing_since = time.monotonic()
     last_preparation = 0
+    last_bytes_at = preparing_since
+    byte_marks = {}
+    postprocessing = threading.Event()
 
     def preparing():
         nonlocal last_preparation
         elapsed = int(time.monotonic() - preparing_since)
         with progress_lock:
+            if not postprocessing.is_set() and time.monotonic() - last_bytes_at > 60:
+                raise TimeoutError('Источник не передаёт данные больше 60 секунд')
             if not started.is_set() and elapsed > last_preparation:
                 last_preparation = elapsed
                 progress(None, f"Подготовка · {elapsed} с. Ожидаем ответ источника…")
 
     def on_line(line):
-        done, total, fragment, fragments = map(number, (line.split() + [None] * 4)[:4])
+        nonlocal last_bytes_at
+        if line.startswith('VIDDOW_POSTPROCESS '):
+            processor = line.split()[1:2]
+            if started.is_set() and processor and processor[0] in {'Merger', 'Metadata', 'MoveFiles', 'VideoRemuxer', 'FixupM3u8', 'FixupTimestamp', 'FixupDuration', 'FixupDuplicateMoov'}:
+                postprocessing.set()
+                finishing()
+            return
+        fields = line.split()
+        done, total, fragment, fragment_count = map(number, (fields + [None] * 4)[:4])
         if done is None:
             return
+        observed_bytes(done, fields[4] if len(fields) > 4 else 'tool')
         with progress_lock:
-            started.set()
+            track = fields[4] if len(fields) > 4 else 'tool'
+            if done > byte_marks.get(track, 0):
+                last_bytes_at = time.monotonic()
+                byte_marks[track] = done
+            if done > 0:
+                started.set()
             if total:
                 progress(done / total, megabytes(done, total))
-            elif fragments:
-                progress(fragment / fragments, f"{megabytes(done)}  кусок {fragment:.0f} из {fragments:.0f}")
+            elif fragment_count:
+                progress(fragment / fragment_count, f"{megabytes(done)}  кусок {fragment:.0f} из {fragment_count:.0f}")
             else:
                 progress(None, megabytes(done))
 
-    with tempfile.TemporaryDirectory() as tmp:
+    if location == 'destination':
+        os.makedirs(folder, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='.viddow-work-', dir=folder if location == 'destination' else None) as tmp:
         # stdout занят строками прогресса — итоговый путь yt-dlp пишет в файл
         saved_to = os.path.join(tmp, "path")
-        command = [executable, "--no-playlist", "--no-overwrites", "--quiet", "--progress", "--newline",
+        command = [executable, "--no-playlist", "--no-overwrites", "--no-quiet", "--no-warnings", "--progress", "--newline",
                    "--socket-timeout", "30",
                    "--retries", "1", "--fragment-retries", "2", "--extractor-retries", "1",
-                   "--retry-sleep", "http:2", "--retry-sleep", "fragment:1", "--abort-on-unavailable-fragments",
+                   "--retry-sleep", "http:exp=1:8", "--retry-sleep", "fragment:exp=1:4", "--abort-on-unavailable-fragments",
                    "--progress-template",
                    "download:%(progress.downloaded_bytes)s %(progress.total_bytes)s "
-                   "%(progress.fragment_index)s %(progress.fragment_count)s",
+                   "%(progress.fragment_index)s %(progress.fragment_count)s %(info.format_id)s",
+                   "--progress-template", "postprocess:VIDDOW_POSTPROCESS %(progress.postprocessor)s %(progress.status)s",
                    # кусочки HLS/DASH качаются параллельно — в этом весь выигрыш в скорости
-                   "--concurrent-fragments", str(CONCURRENT_FRAGMENTS),
+                   "--concurrent-fragments", str(fragments()),
                    "--merge-output-format", "mp4/mkv",
                    # сотни кусочков и промежуточные дорожки — во временную папку, а не в «Загрузки»;
                    # она удаляется вместе с tmp, даже если загрузка упала
@@ -573,7 +614,7 @@ def run_ytdlp(url, folder, name, headers, progress, stream=False, cancel=None, f
 
 def main():
     parser = argparse.ArgumentParser(description="Скачать видео и файлы по ссылкам.")
-    parser.add_argument("urls", nargs="+", metavar="URL",
+    parser.add_argument("urls", nargs="*", metavar="URL",
                         help="ссылка на файл, поток .m3u8/.mpd или страницу с видео")
     parser.add_argument("-o", "--output", default=DEFAULT_DIR,
                         help=f"папка для сохранения (по умолчанию {DEFAULT_DIR})")
@@ -584,7 +625,13 @@ def main():
                         help="User-Agent браузера, где играло видео — подписанные ссылки к нему привязаны (иначе 410)")
     parser.add_argument("--source-kind", choices=("auto", "page", "direct"), default="auto",
                         help="тип ссылки: auto, страница page или прямой файл direct")
+    parser.add_argument('--clear-incomplete', action='store_true', help='удалить неактивные незавершённые загрузки в выбранной папке')
     args = parser.parse_args()
+    if args.clear_incomplete:
+        from partial_store import PartsStore
+        print(PartsStore(args.output).cleanup(all_inactive=True))
+    if not args.urls and not args.clear_incomplete:
+        parser.error('нужна ссылка или --clear-incomplete')
     browser_headers = {"User-Agent": args.user_agent} if args.user_agent else None
 
     failed = 0

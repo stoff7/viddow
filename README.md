@@ -31,6 +31,14 @@ Windows-порт в разработке: [технический этап дл�
 
 По умолчанию файлы сохраняются в `~/Downloads`.
 
+В рабочей ветке добавлены [замеры и ограничение параллелизма](docs/download-optimization-contract.md):
+`VIDDOW_FRAGMENT_BUDGET` задаёт бюджет fragment workers одного host (default 32).
+Прямые HTTP-файлы на POSIX могут продолжаться после временного обрыва при
+подтверждённой версии объекта; отмена удаляет части, автозагрузки после запуска нет.
+HLS/DASH между запусками и Windows persistence пока не поддерживаются.
+Удалить неактивные части: `python3 download.py --clear-incomplete -o /absolute/output`.
+Результаты сравнения и ограничения — в [отчёте](docs/session-report-2026-11-13-download-optimization.md).
+
 ## Требования
 
 - Python 3.9 или новее.

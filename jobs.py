@@ -13,6 +13,8 @@ from typing import Optional
 import download
 from diagnostics import describe_error
 from trace_log import trace_event
+from download_runtime import Attempt, fragment_budget as validated_budget, fragment_share
+from work_scheduler import WorkScheduler
 
 ACTIVE = {"queued", "running", "cancelling"}
 TERMINAL = {"done", "error", "cancelled", "interrupted"}
@@ -38,6 +40,7 @@ class Job:
     error_code: Optional[str] = None
     error_detail: Optional[str] = None
     attempt_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    queued_at: float = field(default_factory=time.monotonic)
 
     def snapshot(self):
         return {"id": self.id, "attempt_id": self.attempt_id, "url": self.url, "name": self.options.get("name"),
@@ -55,7 +58,9 @@ class Job:
 
 
 class JobManager:
-    def __init__(self, workers=2, folder=download.DEFAULT_DIR, runner=None, max_pending=200):
+    def __init__(self, workers=2, folder=download.DEFAULT_DIR, runner=None, max_pending=200, fragment_budget=None):
+        self.fragment_budget = validated_budget(fragment_budget)
+        self.scheduler = WorkScheduler()
         self.workers = workers
         self.folder = folder
         self.runner = runner or download.download
@@ -63,7 +68,7 @@ class JobManager:
         self._lock = threading.RLock()
         self._jobs = {}
         self._ids = itertools.count(1)
-        self._executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="download")
+        self._executor = ThreadPoolExecutor(max_workers=min(workers, self.fragment_budget), thread_name_prefix="download")
         self._closed = False
 
     def restore_history(self, records):
@@ -137,6 +142,13 @@ class JobManager:
             job = self._jobs[job_id]
             if job.status in ACTIVE:
                 job.cancel.set()
+                if job.status == 'queued':
+                    from partial_store import PartsStore, digest
+                    headers = download.request_headers(job.options.get('referer'), job.options.get('headers'))
+                    try:
+                        PartsStore(self.folder).discard(digest(['direct-v1', job.url, headers]))
+                    except OSError:
+                        pass  # Cancellation must remain available if the disk disappeared.
                 job.status = "cancelled" if job.status == "queued" else "cancelling"
                 job.label = "Отменено" if job.status == "cancelled" else "Останавливаем загрузку…"
             return job.snapshot()
@@ -163,7 +175,7 @@ class JobManager:
             if self._closed or any(job.status in ACTIVE for job in self._jobs.values()):
                 raise Conflict("Настройки можно изменить после завершения или отмены активных загрузок")
             previous = self._executor
-            self._executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="download")
+            self._executor = ThreadPoolExecutor(max_workers=min(workers, self.fragment_budget), thread_name_prefix="download")
             self.workers, self.folder = workers, folder
         previous.shutdown(wait=True, cancel_futures=True)
 
@@ -189,11 +201,13 @@ class JobManager:
                 selection["cookie_browser"] = job.options["cookie_browser"]
             if job.options.get('prepared_info'):
                 selection['prepared_info'] = job.options['prepared_info']
-            path = self.runner(job.url, folder=self.folder, name=job.options.get("name"),
-                               referer=job.options.get("referer"), progress=progress,
-                               browser_headers=job.options.get("headers"),
-                               page_url=job.options.get("page"), cancel=job.cancel,
-                               source_kind=job.options.get("source_kind", "auto"), **selection)
+            with self.scheduler.foreground(), Attempt(queued=job.queued_at, attempt_tag=job.attempt_id,
+                         fragments=fragment_share(self.fragment_budget, self.workers)):
+                path = self.runner(job.url, folder=self.folder, name=job.options.get("name"),
+                                   referer=job.options.get("referer"), progress=progress,
+                                   browser_headers=job.options.get("headers"),
+                                   page_url=job.options.get("page"), cancel=job.cancel,
+                                   source_kind=job.options.get("source_kind", "auto"), **selection)
             with self._lock:
                 # Возвращённый путь означает готовый файл, даже если отмена пришла на финише.
                 job.path, job.status, job.fraction, job.label = path, "done", 1, "Сохранено"

@@ -291,6 +291,18 @@ class InspectorTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             inspector.preview(identifier, source_id)
 
+    def test_rejected_source_requires_fresh_analysis_but_keeps_other_sources(self):
+        inspector = self.inspector()
+        identifier = inspector.start('https://page.test/')['analysis_id']
+        wait_for(lambda: inspector.snapshot()['status'] == 'done')
+        source_id = inspector.snapshot()['result']['source_id']
+        ids = inspector.snapshot()['result']['recommended_format_ids']
+        inspector.reject_source(identifier, source_id)
+        with self.assertRaisesRegex(ValueError, 'свежие'):
+            inspector.selection(identifier, ids, source_id)
+        with self.assertRaises(ValueError):
+            inspector.preview(identifier, source_id)
+
     @patch('inspector.resolve_tool', return_value=None)
     @patch('inspector.urllib.request.urlopen')
     def test_missing_extractor_does_not_contact_source(self, request, which):

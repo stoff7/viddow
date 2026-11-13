@@ -1,73 +1,70 @@
-# Viddow: оптимизация загрузок поверх текущего Windows-порта
+# Viddow: оптимизации поверх сохранённого Windows-порта
 
-Обновлено 13 ноября 2026. Пользователь запросил идеи оптимизации и передачу
-следующей сессии. Начать с [download-optimization.md](download-optimization.md).
-Порядок: измерения → лимит параллелизма → приоритет скачивания над превью →
-сохранение частей/восстановление. Численные настройки пока гипотезы для сравнения.
+Обновлено 13 ноября 2026. Начать с
+[отчёта сессии](../docs/session-report-2026-11-13-download-optimization.md) и
+[контракта](../docs/download-optimization-contract.md).
+Исходный план сохранён в [download-optimization.md](download-optimization.md);
+[предыдущий вход](archive/handoff-before-optimization-implementation-2026-11-13.md).
 
 ## Git и сохранность
 
-- Проект /Users/staslisicin/Projects/downloader, ветка feat/download-workspace,
-  интеграционная main. До этого handoff HEAD `7f6f977`.
-- Рабочее дерево содержит незакоммиченный Windows-порт и общие исправления,
-  включая новые Python-модули, тесты и документы. Не начинать от чистого релиза.
-- Важные новые файлы: platform_support.py, native_protocol.py,
-  windows_native_install.py, prototypes/windows_job.py, Windows/process fixtures.
-  Проверить полный git status; git diff не показывает untracked.
-- .agents/, skills-lock.json и handoff/experiments/ — пользовательские материалы;
-  не включать их автоматически. Не применять reset/clean.
-- Релиз v3.4.0 на b2b2abe опубликован по сообщению пользователя; main не изменена.
-  Удалённые refs и артефакты сейчас не проверялись. Push/merge не выполнять.
-- Этот handoff сохраняется отдельно; код порта не коммитится этим действием.
+- Ветка feat/download-workspace, интеграционная main. До работы HEAD 0e0a2ec.
+- ecb1292 отдельно сохраняет исходный Windows-порт и общие platform fixes.
+  Все 30 файлов этого коммита побайтно сверены с исходным SHA-256 снимком.
+- Следующий локальный коммит содержит оптимизации, контракты, тесты и результаты.
+  Проверить git log/status: пользовательские изменения могли появиться позже.
+- .agents/, skills-lock.json и handoff/experiments/ не добавлялись и не удалялись.
+- Main, тег v3.4.0, remote refs не менялись. Push/merge/release/install не было.
+- Исходный дополнительный tar/patch/manifest:
+  /tmp/viddow-before-download-optimization-1794561615035683000/.
 
-## Текущее состояние и реальные границы
+## Реализовано
 
-- Компактная панель, общая очередь, история, выбор медиа/качества/аудио, GIF,
-  отмена/повтор и раннее намерение скачать уже существуют. Не переписывать UI.
-- В рабочем дереве Windows HKCU-регистрация, .cmd launcher с CPython 3.11+,
-  полный binary framing и отдельный Job Object-прототип. Windows не исполнялся,
-  production run_tool не владеет Windows Job Object, отменяет только родителя.
-- Общая часть уже внедрена: resolver пяти инструментов/зависимостей yt-dlp,
-  stdin DEVNULL, UTF-8, финализация direct/ffmpeg без перезаписи при коллизии.
-- По [отчёту порта](../docs/session-report-2026-11-12-windows-port.md) 71 адресный
-  тест прошёл на macOS, включая реальный локальный HLS video+audio/GIF/native.
-  Пять Windows Job-тестов пропущены по ОС. Числа включают повторные native-тесты,
-  не суммировать их с предыдущими прогонами. Browser/full suite не запускались.
-- У пользователя Windows 11 x64, проверка отложена. Windows ready не заявлять.
-  Known Folder/Explorer/имена/ACL/пользовательские логи ещё не реализованы.
-- В сессии обсуждения оптимизации код не менялся, тесты не запускались.
+- download_runtime.py: monotonic queue/first bytes/transfer/finishing/total,
+  непрозрачные attempt/run IDs. Unknown не заменяется выдуманным retry/TCP count.
+- JobManager: VIDDOW_FRAGMENT_BUDGET 1..64, default 32; статическая доля до 16
+  на активную задачу, активных не более min(workers,budget). Без рестартов yt-dlp.
+- WorkScheduler: скачивания не ждут GIF, одна optional background-операция,
+  конечная отсрочка 2 с, FIFO и cancel. Native Inspector разделяет scheduler
+  с manager. Контекст после access/expiry/source error требует свежего анализа.
+- Direct HTTP: до 3 GET, ограниченное recovery wait, Retry-After, отмена ожидания.
+  Strong ETag + length + SHA-256 + HEAD + корректный Range/If-Range.
+- partial_store.py: приватные POSIX parts на диске результата, flock, изоляция
+  совпавших запросов, checkpoint, TTL 7 дней, квота 5 ГиБ / 128 inactive записей.
+  Cancel очищает части, после запуска нет автозагрузок. Pause не добавлен.
+- Удаление inactive: CLI --clear-incomplete, native clear_incomplete,
+  локальный POST /partials/clear. Пустой root с .directory.lock может остаться.
+- Streams: существующие yt-dlp retries/backoff/abort-on-unavailable-fragments,
+  60 с без наблюдаемого прогресса до postprocess, без внешнего умножения retries.
+  VIDDOW_TEMP_LOCATION=system|destination, default system.
+- Resolver, DEVNULL, UTF-8, no-replace finalization и Windows framing сохранены.
+  Windows Job Object остаётся прототипом.
 
-## Найденные точки оптимизации
+## Проверено
 
-- download.py: CONCURRENT_FRAGMENTS=16, yt-dlp получает это значение на задачу.
-  JobManager по умолчанию workers=2: до 32 конкурентных фрагментов для применимых
-  загрузок плюс подготовка/превью; это не измеренное число TCP-соединений.
-- retries=1, fragment-retries=2, фиксированные задержки; временный каталог
-  TemporaryDirectory удаляется после попытки, межзадачного resume нет.
-- Подготовка, ffprobe/GIF и загрузки используют те же сеть/CPU. Эффект конкуренции
-  ещё не измерен. Не увеличивать число процессов/соединений вслепую.
-- Temp может быть на другом диске, чем папка результата; влияние копирования
-  нужно измерить. Подготовленный секретный JSON не смешивать с сохраняемыми частями.
+- Адресный завершающий набор: 118 тестов, 113 passed и 5 Windows skips по ОС.
+  Полная команда в отчёте; полный suite и browser smoke не выполнялись.
+- 162 корректных локальных benchmark-сценария, ffprobe проверяет video+audio
+  и длительность. 100 initial + 28 final policy + 34 contention/disk/resources.
+- Реальное уменьшение повторной передачи direct подтверждено между разными
+  Python-процессами: 196608 сохранённых + 851968 новых = 1048576 байт.
+- git diff --check и py_compile прошли. Число ранних 54 тестов не суммировать.
+- Меньший fragment default не выбран: ошибки/latency медленнее при 2/4/8.
+  Статистическая performance acceptance по 2 повторам и реальным CDN не закрыта.
+  Ресурсный монитор есть только в локальном harness.
 
-## Следующие действия
+## Оставшаяся работа и ограничения
 
-1. Прочитать план оптимизации и текущие download/jobs/inspector/media_prepare/
-   trace_log; описать измеряемые стадии и область лимита (один native-host).
-2. Добавить обезличенные измерения и воспроизводимые локальные сценарии.
-3. Сравнить 2/4/8/16 фрагментов при одной и нескольких задачах; выбрать политику
-   по результатам, сохранив очередь, отмену и правильные дорожки.
-4. Приоритизировать явное скачивание; фоновые GIF/анализы ограничить без голодания,
-   кешировать только подтверждённый актуальный контекст того же медиа/сеанса.
-5. Отдельным контрактом внедрять восстановление: сначала внутри задачи,
-   затем между запусками. Не подставлять свежий URL в старые части без проверки.
+1. HLS/DASH между исполнениями не восстанавливаются. Пока не доказана версия
+   всех сегментов/init data и безопасность нового manifest, запускать отдельно.
+2. Windows persistence отключён до ACL/process-ownership acceptance. Реальная
+   Windows 11 x64, Known Folder, Explorer и integration Job Object не проверены.
+3. Измерить реальные большие/долгие загрузки, внешний диск, ENOSPC во время mux.
+   Малый локальный fixture не доказывает отсутствие регрессий на CDN.
+4. Для HTTP auto без известного файлового расширения сохранён прежний save-путь;
+   для восстановления можно явно использовать source_kind=direct.
+5. Не считать fragment budget точным TCP cap или общекомпьютерным лимитом.
 
-## Договорённости
-
-Проверки выполнять завершающим этапом законченной работы, не после каждой правки;
-полный набор автоматически не запускать. Не мешать пользовательским загрузкам,
-не читать личные cookies ради тестов. Логи не содержат URL/headers/пути/пиксели.
-Не добавлять daemon/новый downloader/фреймворк ради оптимизации. Не обещать ускорение
-до замеров. Windows-прототип не интегрировать под видом оптимизации без WinAPI-проверки.
-[Windows development](windows-development.md), [аудит](windows-audit.md),
-[состояние порта](../docs/windows-development.md),
-[архив старого входа](archive/handoff-before-download-optimization-2026-11-13.md).
+Пользователь просил тесты завершающим этапом и Markdown-отчёт. Не читать личные
+cookies ради проверок, не трогать текущие загрузки и не обещать ускорение без
+замеров. Подробности Windows: [windows-development](windows-development.md).

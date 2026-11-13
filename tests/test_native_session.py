@@ -104,7 +104,8 @@ class NativeSessionTests(unittest.TestCase):
         self.wait(lambda message: message["type"] == "state" and len(message["jobs"]) == 3)
         self.process.stdin.close()
         self.assertEqual(self.process.wait(timeout=4), 0)
-        self.assertEqual(list(Path(self.folder.name).iterdir()), [])
+        remaining = list(Path(self.folder.name).rglob('*'))
+        self.assertTrue(all(path.name in ('.viddow-parts', '.directory.lock') for path in remaining), remaining)
 
     def test_invalid_commands_do_not_break_session(self):
         for command, args in [("download", {"urls": ["file:///etc/passwd"]}),

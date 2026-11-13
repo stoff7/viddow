@@ -83,6 +83,9 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/jobs/clear":
                 self.server.jobs.clear()
                 return self.json_reply(200, {"ok": True})
+            if path == '/partials/clear':
+                from partial_store import PartsStore
+                return self.json_reply(200, {'removed': PartsStore(self.server.jobs.folder).cleanup(all_inactive=True)})
             match = re.fullmatch(r"/jobs/(\d+)/(cancel|retry)", path)
             if match:
                 job_id, action = int(match[1]), match[2]

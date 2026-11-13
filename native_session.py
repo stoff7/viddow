@@ -40,13 +40,21 @@ class Session:
         self.manager = manager_factory(workers=workers, folder=folder)
         self.send = send
         self.id = uuid.uuid4().hex
-        self.inspector = Inspector()
+        self.inspector = Inspector(scheduler=self.manager.scheduler)
         self._previews = ThreadPoolExecutor(max_workers=2, thread_name_prefix="media-preview")
         self._publish_lock = threading.Lock()
+        self._selection_lock = threading.Lock()
+        self._selection_jobs = {}
         self.manager.restore_history(history or [])
 
     def state(self):
-        return {"type": "state", "session": self.id, "jobs": self.manager.snapshots(),
+        jobs = self.manager.snapshots()
+        with self._selection_lock:
+            for job in jobs:
+                source = self._selection_jobs.get(job['id'])
+                if source and job['status'] == 'error' and job['error_code'] in {'expired_link', 'access_denied', 'authentication_required', 'source_unavailable'}:
+                    self.inspector.reject_source(*source)
+        return {"type": "state", "session": self.id, "jobs": jobs,
                 "history_version": 1,
                 "settings": {"workers": self.manager.workers, "output_dir": self.manager.folder, "youtube_browser": self.youtube_browser},
                 "tools": tool_status(),
@@ -63,12 +71,18 @@ class Session:
             if command == "download":
                 trace_event("download_requested", analysis_tag=message.get("analysis_id"), source_tag=message.get("source_id"))
                 if message.get("analysis_id") is not None:
+                    self.state()  # Reject a source whose last completed attempt lost access.
                     urls, options = self.inspector.selection(message["analysis_id"], message.get("format_ids"), message.get("source_id"))
                 else:
                     urls, options = download_options(message)
                     if self.youtube_browser != "none":
                         options["cookie_browser"] = self.youtube_browser
                 result = {"ids": self.manager.add(urls, **options)}
+                if message.get('analysis_id'):
+                    source_id = message.get('source_id') or self.inspector.snapshot()['result']['source_id']
+                    with self._selection_lock:
+                        for job_id in result['ids']:
+                            self._selection_jobs[job_id] = (message['analysis_id'], source_id)
                 trace_event("download_queued", jobs_count=len(result["ids"]), job_id=result["ids"][0] if result["ids"] else 0)
             elif command == "inspect":
                 urls, options = download_options(message)
@@ -123,6 +137,9 @@ class Session:
                 if command == "cancel":
                     result = self.manager.cancel(job_id)
                 elif command == "retry":
+                    job = next((row for row in self.manager.snapshots() if row['id'] == job_id), None)
+                    if job and job['format_ids'] and job['error_code'] in {'expired_link', 'access_denied', 'authentication_required', 'source_unavailable'}:
+                        raise ValueError('Источник отклонил прежние форматы. Получите свежие форматы со страницы.')
                     result = {"id": self.manager.retry(job_id, cookie_browser=self.youtube_browser)}
                 else:
                     job = next((job for job in self.manager.snapshots() if job["id"] == job_id), None)
@@ -132,6 +149,9 @@ class Session:
                     subprocess.run(["open", "-R", job["path"]], check=True, timeout=10)
             elif command == "clear":
                 self.manager.clear()
+            elif command == 'clear_incomplete':
+                from partial_store import PartsStore
+                result = {'removed': PartsStore(self.manager.folder).cleanup(all_inactive=True)}
             elif command == "configure":
                 workers, folder = settings_from(message.get("settings"))
                 browser = cookie_browser_from(message["settings"].get("youtube_browser", "none"))

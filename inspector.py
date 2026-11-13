@@ -17,6 +17,7 @@ from source_auth import is_youtube, ytdlp_auth_args
 from diagnostics import describe_error
 from media_prepare import recommended, preview_gif
 from trace_log import trace_event
+from work_scheduler import WorkScheduler
 from media_tracks import probe_unknown, private_formats, group_x_sources
 
 TIMEOUT = 30
@@ -158,8 +159,9 @@ def inspect_source(url, options, cancel, timeout=TIMEOUT):
 
 
 class Inspector:
-    def __init__(self, inspect=inspect_source):
+    def __init__(self, inspect=inspect_source, scheduler=None):
         self.inspect = inspect
+        self.scheduler = scheduler or WorkScheduler()
         self._lock = threading.RLock()
         self._cancel = threading.Event()
         self._thread = None
@@ -218,7 +220,8 @@ class Inspector:
                 # Each candidate has its own context, timeout and failure. Never merge by title/path.
                 def analyze(item):
                     options = {**self._options, **item['options'], '_timeout': 12}
-                    return self._analyze(item['url'], options)
+                    with self.scheduler.background(self._cancel):
+                        return self._analyze(item['url'], options)
                 with ThreadPoolExecutor(max_workers=2, thread_name_prefix='media-candidate') as pool:
                     futures = [pool.submit(analyze, item) for item in self._fallbacks]
                     for future in as_completed(futures):
@@ -263,7 +266,7 @@ class Inspector:
 
     def preview(self, identifier, source_id):
         with self._lock:
-            if not self._state or self._state['id'] != identifier or self._state['status'] != 'done' or source_id not in self._sources:
+            if not self._state or self._state['id'] != identifier or self._state['status'] != 'done' or source_id not in self._sources or self._sources[source_id].get('invalid'):
                 raise ValueError('Выбранное видео изменилось.')
             source, cancel = self._sources[source_id], self._cancel
         with source['preview_lock']:
@@ -271,11 +274,19 @@ class Inspector:
             if not source['preview_done']:
                 started = time.monotonic()
                 trace_event('preview_start', analysis_tag=identifier, source_tag=source_id)
-                source['preview'] = preview_gif(source['preview_context'], cancel)
+                with self.scheduler.background(cancel):
+                    source['preview'] = preview_gif(source['preview_context'], cancel)
                 source['preview_done'] = True
                 trace_event('preview_done' if source['preview'] else 'preview_error', analysis_tag=identifier, source_tag=source_id, bytes_count=len(source['preview'] or ''), elapsed_ms=int((time.monotonic() - started) * 1000))
             download.check_cancel(cancel)
+            if source.get('invalid'):
+                raise ValueError('Источник изменился. Обновите анализ.')
             return {'analysis_id': identifier, 'source_id': source_id, 'image': source['preview']}
+
+    def reject_source(self, identifier, source_id):
+        with self._lock:
+            if self._state and self._state['id'] == identifier and source_id in self._sources:
+                self._sources[source_id]['invalid'] = True
 
     def snapshot(self):
         with self._lock:
@@ -311,6 +322,8 @@ class Inspector:
             source = self._sources.get(source_id)
             if not source:
                 raise ValueError('Выбранного видео нет в результате анализа')
+            if source.get('invalid'):
+                raise ValueError('Источник больше недоступен. Запросите свежие форматы со страницы.')
             formats = {item["id"]: item for item in source['result']['formats']}
             if any(identifier not in formats for identifier in ids):
                 raise ValueError("Выбранного формата нет в результате анализа")

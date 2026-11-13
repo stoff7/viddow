@@ -13,3 +13,5 @@ urls.txt
 # Redacted local runtime diagnostics.
 logs/
 windows-native/
+.viddow-parts/
+.viddow-work-*/

@@ -20,7 +20,7 @@ page_context_start page_context_ready page_context_unavailable stream_seen prepa
 prepare_candidate prepare_candidates prepare_waiting prepare_batch_start prepare_download prepare_cancelled
 analysis_start candidate_start candidate_done candidate_error analysis_done analysis_cancelled preview_start
 preview_done preview_error download_requested download_queued job_start job_done job_error job_cancelled
-process_start process_done process_error probe_start probe_done probe_error'''.split())
+process_start process_done process_error probe_start probe_done probe_error download_timing recovery_state'''.split())
 CODES = frozenset('''host_not_found timeout protocol_mismatch connection_lost command_failed unsupported_source
 embedded_source_error analysis_timeout network_timeout network_tls network authentication_required browser_session_unavailable drm
 expired_link destination_permission destination_full destination_unavailable access_denied source_unavailable
@@ -28,12 +28,14 @@ rate_limited missing_dependency download_error visible_document current_generati
 missing_scope explicit_mismatch player_media_id no_streams excluded_streams missing_context preview_too_large preview_no_video'''.split())
 COUNTS = frozenset('''elapsed_ms candidates_count eligible_count visible_count hidden_count unbound_count
 rejected_count formats_count bytes_count jobs_count job_id tab_id source_index line column video_count audio_count unknown_count'''.split())
-IDS = frozenset(('analysis_tag', 'source_tag', 'candidate_tag', 'document_tag', 'attempt_tag'))
+METRICS = frozenset('queue_ms preparation_ms first_byte_ms transfer_ms finishing_ms observed_bytes reused_bytes'.split())
+IDS = frozenset(('analysis_tag', 'source_tag', 'candidate_tag', 'document_tag', 'attempt_tag', 'run_tag'))
 ENUMS = {
-    'command': frozenset('inspect preview inspect_cancel inspect_history download cancel retry clear configure reveal'.split()),
+    'command': frozenset('inspect preview inspect_cancel inspect_history download cancel retry clear clear_incomplete configure reveal'.split()),
     'status': frozenset('running cancelling cancelled done error cleared page waiting blocked recovering choose downloaded'.split()),
     'kind': frozenset(('HLS', 'DASH')),
     'tool': frozenset(('ffmpeg', 'ffprobe', 'yt-dlp', 'python', 'python3')),
+    'recovery': frozenset(('fresh', 'resumed', 'discarded', 'retained')),
     'name': frozenset('Error TypeError ReferenceError SyntaxError RangeError DOMException'.split()),
     'file': frozenset(('popup.js', 'startup.js', 'background.js', 'preparation.mjs', 'page-context.mjs',
         'media-model.mjs', 'format-model.mjs', 'history-model.mjs', 'stream-model.mjs', 'diagnostics.mjs')),
@@ -49,6 +51,13 @@ def clean_event(event, fields=None, origin='native'):
         value = fields.get(key)
         if type(value) is int and 0 <= value <= 10**9:
             row[key] = value
+    for key in METRICS:
+        value = fields.get(key)
+        if type(value) is int and 0 <= value <= 2**53 - 1:
+            row[key] = value
+    value = fields.get('fragment_workers')
+    if type(value) is int and 1 <= value <= 16:
+        row['fragment_workers'] = value
     if type(fields.get('frame_id')) is int and -1 <= fields['frame_id'] <= 10**9:
         row['frame_id'] = fields['frame_id']
     for key in IDS:
