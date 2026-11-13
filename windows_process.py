@@ -10,7 +10,7 @@ import threading
 import time
 
 if os.name != "nt":
-    raise ImportError("This prototype requires Windows")
+    raise ImportError("Windows process ownership requires Windows")
 
 SIZE_T = c.c_size_t
 
@@ -144,14 +144,16 @@ class JobProcess:
                                   environment, None, c.byref(startup), c.byref(process)))
             self._process = process.hProcess
             self.pid = process.dwProcessId
+            checked(CloseHandle(process.hThread))
             self.stdout = io.open(read_fd, "r", encoding="utf-8", errors="replace")
             read_fd = None
-            checked(CloseHandle(process.hThread))
             if cancel is not None and cancel.is_set():
                 self.stop()
                 raise InterruptedError("Cancelled during process creation")
         except BaseException:
             self.stop()
+            if self.stdout is not None:
+                self.stdout.close()
             raise
         finally:
             for fd in descriptors:

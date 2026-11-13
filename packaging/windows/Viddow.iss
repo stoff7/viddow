@@ -20,6 +20,8 @@ CloseApplications=no
 RestartApplications=no
 UninstallDisplayName=Viddow (Windows test)
 SetupLogging=yes
+AppMutex=Local\ViddowTestHostActive
+SetupMutex=Local\ViddowTestSetup
 
 [Languages]
 Name: "russian"; MessagesFile: "compiler:Languages\Russian.isl"

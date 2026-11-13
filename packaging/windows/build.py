@@ -106,10 +106,18 @@ def main():
     run(CACHE / 'inno' / 'ISCC.exe', f'/DAppVersion={LOCK["version"]}', 'packaging/windows/Viddow.iss')
     shutil.copy2('packaging/windows/WINDOWS-TEST.md', OUT)
     shutil.make_archive(str(OUT / 'Viddow-extension'), 'zip', REPO / 'extension')
+    (OUT / 'build-environment.txt').write_text(subprocess.check_output([sys.executable, '-m', 'pip', 'freeze'], text=True), encoding='utf-8')
+    write_checksums()
+
+
+def write_checksums():
     sums = [f'{hashlib.file_digest(path.open("rb"), "sha256").hexdigest()}  {path.name}'
             for path in sorted(OUT.iterdir()) if path.is_file() and path.name != 'SHA256SUMS.txt']
     (OUT / 'SHA256SUMS.txt').write_text('\n'.join(sums) + '\n', encoding='utf-8')
 
 
 if __name__ == '__main__':
-    main()
+    if sys.argv[1:] == ['--checksums-only']:
+        write_checksums()
+    else:
+        main()

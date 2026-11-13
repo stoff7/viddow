@@ -79,6 +79,9 @@ def main():
             ready = wait_message(messages, lambda row: row.get('type') == 'ready')
             assert ready['protocol'] == 2 and ready['history_version'] == 1
             assert ready['tools']['yt_dlp'] and ready['tools']['ffmpeg']
+            blocked = subprocess.run([*setup_args, '/LOG=' + str(OUT / 'active-host-install.log')], timeout=30)
+            assert blocked.returncode != 0, 'Installer must refuse to replace an active host'
+            REPORT.append('PASS: installer refuses replacement while native host is active')
             session = ready['session']
             send(host, {'command': 'download', 'request_id': 'download', 'session': session,
                         'urls': [f'http://127.0.0.1:{server.server_port}/sample.mp4'], 'name': 'Проверка видео'})

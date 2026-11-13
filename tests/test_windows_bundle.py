@@ -78,17 +78,24 @@ if os.name == 'nt':
 
         def test_handles_do_not_grow(self):
             import ctypes as c
+            import gc
             from ctypes import wintypes as w
             def count():
                 value = w.DWORD()
                 job_tests.checked(job_tests.HandleCount(job_tests.CurrentProcess(), c.byref(value)))
                 return value.value
-            before = count()
-            for _ in range(12):
+            def cycle():
                 owner = JobProcess([sys.executable, '-c', 'pass'])
                 try:
                     self.assertEqual(owner.wait(timeout=5), 0)
                 finally:
                     owner.stop()
                     owner.stdout.close()
+            for _ in range(3):
+                cycle()
+            gc.collect()
+            before = count()
+            for _ in range(12):
+                cycle()
+            gc.collect()
             self.assertLessEqual(count(), before + 1)
