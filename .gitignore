@@ -15,3 +15,8 @@ logs/
 windows-native/
 .viddow-parts/
 .viddow-work-*/
+
+# Reproducible packaging outputs.
+build/
+dist/
+*.spec

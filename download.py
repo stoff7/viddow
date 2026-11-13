@@ -36,7 +36,8 @@ from macos_metadata import complete_download_metadata
 from email.message import Message
 
 CHUNK_SIZE = 64 * 1024
-DEFAULT_DIR = os.path.expanduser("~/Downloads")
+from platform_support import downloads_directory
+DEFAULT_DIR = downloads_directory()
 BAR_WIDTH = 30
 # как у обычного браузера — CDN часто отказывают urllib и ffmpeg с их собственным User-Agent
 USER_AGENT = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
@@ -190,6 +191,9 @@ def finalize_file(part, path, cancel=None):
 
 def stop_process(process):
     """Останавливаем только собственный процесс и его группу, включая ffmpeg из yt-dlp."""
+    if os.name == "nt":
+        process.stop()
+        return
     def send(sig):
         try:
             if os.name == "posix":
@@ -218,10 +222,13 @@ def run_tool(command, on_line, cancel=None, max_line_chars=None, on_idle=None):
     tags = {'attempt_tag': attempt.attempt_tag, 'run_tag': attempt.run_tag} if attempt else {}
     trace_event("process_start", tool=tool, **tags)
     with tempfile.TemporaryFile("w+", encoding="utf-8", errors="replace") as errors:
-        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=errors, text=True,
-                                   encoding="utf-8",
-                                   stdin=subprocess.DEVNULL, env=tool_environment(),
-                                   start_new_session=os.name == "posix")
+        if os.name == "nt":
+            from windows_process import JobProcess
+            process = JobProcess(command, stderr=errors, env=tool_environment())
+        else:
+            process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=errors, text=True,
+                                       encoding="utf-8", stdin=subprocess.DEVNULL,
+                                       env=tool_environment(), start_new_session=True)
         finished = threading.Event()
         watcher_errors = []
 
@@ -252,7 +259,7 @@ def run_tool(command, on_line, cancel=None, max_line_chars=None, on_idle=None):
             finished.set()
             if watcher:
                 watcher.join()
-            if process.poll() is None:
+            if os.name == "nt" or process.poll() is None:
                 stop_process(process)
             process.stdout.close()
             trace_event("process_done" if process.returncode == 0 else "process_error", tool=tool, elapsed_ms=int((time.monotonic() - started) * 1000), **tags)

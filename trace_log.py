@@ -12,6 +12,8 @@ except ImportError:
     fcntl = None
 
 DEFAULT_PATH = Path(__file__).resolve().parent / 'logs' / 'viddow.jsonl'
+if os.name == 'nt':
+    DEFAULT_PATH = Path(os.environ['LOCALAPPDATA']) / 'Viddow' / 'logs' / 'viddow.jsonl'
 MAX_BYTES = 512 * 1024
 _LOCK = threading.Lock()
 EVENTS = frozenset('''panel_start panel_ready panel_error panel_stalled host_connect_start host_ready

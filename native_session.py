@@ -146,7 +146,11 @@ class Session:
                     if not job or job["status"] != "done" or not job["path"] or not os.path.isfile(job["path"]):
                         raise ValueError("Готовый файл не найден")
                     # Путь берётся только из результата загрузки, а не из сообщения браузера.
-                    subprocess.run(["open", "-R", job["path"]], check=True, timeout=10)
+                    if os.name == "nt":
+                        from platform_support import reveal_file
+                        reveal_file(job["path"])
+                    else:
+                        subprocess.run(["open", "-R", job["path"]], check=True, timeout=10)
             elif command == "clear":
                 self.manager.clear()
             elif command == 'clear_incomplete':

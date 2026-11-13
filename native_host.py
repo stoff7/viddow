@@ -73,7 +73,8 @@ def reveal(path):
     path = os.path.realpath(path)
     if os.path.dirname(path) != os.path.realpath(download.DEFAULT_DIR) or not os.path.exists(path):
         raise ValueError("файла нет в папке загрузок")
-    subprocess.run(["open", "-R", path], check=True)
+    from platform_support import reveal_file
+    reveal_file(path)
 
 
 def run_download(message):
