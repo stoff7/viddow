@@ -568,7 +568,7 @@ function renderState(next) {
   const folder = state.settings.output_dir || '~/Downloads';
   $('folderLabel').textContent = folder.endsWith('/Downloads') ? 'Загрузки' : folder.split('/').filter(Boolean).pop();
   $('folderLabel').title = folder;
-  $('toolsStatus').textContent = state.tools ? `yt-dlp: ${state.tools.yt_dlp ? 'найден' : 'не найден'}. ffmpeg: ${state.tools.ffmpeg ? 'найден' : 'не найден'}.` : 'Подключите помощник, чтобы проверить инструменты.';
+  $('toolsStatus').textContent = state.tools ? `Расширение ${chrome.runtime.getManifest().version}; помощник ${state.build?.version || 'версия неизвестна'}. yt-dlp: ${state.tools.yt_dlp ? 'найден' : 'не найден'}. ffmpeg: ${state.tools.ffmpeg ? 'найден' : 'не найден'}.` : 'Подключите помощник, чтобы проверить инструменты.';
   renderAnalysis(); renderJobs(); renderStreams(); renderCompletion();
 }
 function renderHost(host) {

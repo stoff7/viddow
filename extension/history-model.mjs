@@ -28,7 +28,7 @@ function safeText(value, fallback = '') {
 function normalize(row, legacy = false) {
   if (!row || typeof row !== 'object' || !Number.isSafeInteger(row.id) || row.id < 1 || !STATUSES.has(row.status)) return null;
   const source = pageReference(row.page ?? (legacy ? row.source_page : null));
-  const path = row.status === 'done' && typeof row.path === 'string' && row.path.startsWith('/') && !/[\x00\r\n]/.test(row.path) ? row.path : null;
+  const path = row.status === 'done' && typeof row.path === 'string' && (/^(?:\/|[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/][^\\/]+)/.test(row.path) && !/^\\\\[?.][\\/]/.test(row.path)) && !/[\x00\r\n]/.test(row.path) ? row.path : null;
   const attempt = typeof row.attempt_id === 'string' && /^[a-f0-9]{32}$/.test(row.attempt_id) ? { attempt_id: row.attempt_id } : {};
   return { id: row.id, ...attempt, name: safeText(row.name ?? (legacy ? row.title : null), 'Видео') || 'Видео',
     status: row.status, path, page: source.page,

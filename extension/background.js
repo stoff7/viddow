@@ -102,7 +102,7 @@ async function persistHistory(state) {
 }
 function hostError(reason) {
   if (/not found|forbidden|not registered/i.test(reason || '')) {
-    return 'Помощник не подключён. Выполните в папке проекта: python3 install_native_host.py';
+    return 'Помощник не подключён. Windows: закройте браузер и повторите установку Viddow с ID расширения из chrome://extensions или edge://extensions. macOS: выполните python3 install_native_host.py в папке проекта.';
   }
   return reason || 'Связь с загрузчиком прервалась. Подключитесь снова.';
 }

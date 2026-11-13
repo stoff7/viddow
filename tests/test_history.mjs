@@ -74,3 +74,14 @@ test('attempt identity survives persistent and offline projections without prese
   assert.equal(invalid.jobs[0].attempt_id, undefined);
   assert.equal(JSON.stringify(invalid).includes('secret'), false);
 });
+
+
+test('absolute Windows and UNC paths survive persistence and offline restoration', () => {
+  for (const path of ['C:\\Users\\Тест\\Downloads\\video.mp4', 'D:/Video/file.mp4', '\\\\server\\share\\video.mp4', '/tmp/video.mp4']) {
+    const restored = offlineJobs(decodeHistory(historyFromJobs([{ ...job, path }])).history);
+    assert.equal(restored[0].path, path);
+  }
+  for (const path of ['C:relative.mp4', 'relative.mp4', '\\relative.mp4', '\\\\server', '\\\\?\\C:\\file.mp4', 'C:\\bad\nfile']) {
+    assert.equal(historyFromJobs([{ ...job, path }]).jobs[0].path, null, path);
+  }
+});

@@ -7,13 +7,13 @@ function fixture(videos = [], metadata = {}, canvasFactory = () => { throw new E
   const events = {};
   const context = vm.createContext({ URL, crypto: require('node:crypto').webcrypto, setTimeout, clearTimeout,
     location: { href: 'https://example.test/watch' },
-    window: { addEventListener() {} }, getComputedStyle: node => ({ display: 'block', visibility: 'visible', opacity: '1', ...node.style }),
+    window: { addEventListener() {}, removeEventListener() {} }, getComputedStyle: node => ({ display: 'block', visibility: 'visible', opacity: '1', ...node.style }),
     chrome: { runtime: { sendMessage: async () => {} } },
     document: { createElement: canvasFactory, baseURI: 'https://example.test/watch', documentElement: {},
       querySelectorAll: selector => selector === 'video' ? videos : [],
       querySelector: selector => ({ content: metadata[selector.match(/"([^"]+)"/)[1]] || '' }),
-      addEventListener: (name, callback) => { events[name] = callback; } },
-    MutationObserver: class { observe() {} },
+      removeEventListener() {}, addEventListener: (name, callback) => { events[name] = callback; } },
+    MutationObserver: class { observe() {} disconnect() {} },
   });
   return { read: () => vm.runInContext(source, context), capture: requests => context.__viddowReadPreview(true, requests), events };
 }

@@ -1,5 +1,5 @@
 {
-  "version": "3.5.0-test.1",
+  "version": "3.5.0-test.2",
   "python": "3.12.10",
   "pyinstaller": "6.16.0",
   "components": [

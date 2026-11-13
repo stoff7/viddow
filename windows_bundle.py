@@ -11,7 +11,11 @@ def verify(root):
     manifest = json.loads((root / 'components.json').read_text(encoding='utf-8'))
     for item in manifest['files']:
         path = root / item['path']
-        if not path.is_file() or hashlib.file_digest(path.open('rb'), 'sha256').hexdigest() != item['sha256']:
+        actual = None
+        if path.is_file():
+            with path.open('rb') as file:
+                actual = hashlib.file_digest(file, 'sha256').hexdigest()
+        if actual != item['sha256']:
             raise ValueError(f"Повреждён компонент {item['path']}. Повторите установку Viddow.")
     return manifest
 

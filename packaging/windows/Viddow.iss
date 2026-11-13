@@ -1,5 +1,5 @@
 #ifndef AppVersion
-#define AppVersion "3.5.0-test.1"
+#define AppVersion "3.5.0-test.2"
 #endif
 [Setup]
 AppId=ViddowWindowsPersonalTest

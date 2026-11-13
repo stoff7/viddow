@@ -1,5 +1,7 @@
 """Одна очередь для всех вкладок расширения через постоянный Native Messaging-канал."""
 import os
+import sys
+import json
 from concurrent.futures import ThreadPoolExecutor
 from platform_support import tool_status
 import subprocess
@@ -39,6 +41,9 @@ class Session:
         self.youtube_browser = cookie_browser_from(settings.get("youtube_browser", "none"))
         self.manager = manager_factory(workers=workers, folder=folder)
         self.send = send
+        self.build = {"platform": sys.platform, "version": "development"}
+        if getattr(sys, "frozen", False):
+            self.build["version"] = json.loads((Path(sys.executable).parent / "components.json").read_text(encoding="utf-8"))["version"]
         self.id = uuid.uuid4().hex
         self.inspector = Inspector(scheduler=self.manager.scheduler)
         self._previews = ThreadPoolExecutor(max_workers=2, thread_name_prefix="media-preview")
@@ -55,7 +60,7 @@ class Session:
                 if source and job['status'] == 'error' and job['error_code'] in {'expired_link', 'access_denied', 'authentication_required', 'source_unavailable'}:
                     self.inspector.reject_source(*source)
         return {"type": "state", "session": self.id, "jobs": jobs,
-                "history_version": 1,
+                "history_version": 1, "build": self.build,
                 "settings": {"workers": self.manager.workers, "output_dir": self.manager.folder, "youtube_browser": self.youtube_browser},
                 "tools": tool_status(),
                 "analysis": self.inspector.snapshot()}
