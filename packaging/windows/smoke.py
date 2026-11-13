@@ -101,6 +101,9 @@ def main():
             hls_id = reply['result']['ids'][0]
             done = wait_message(messages, lambda row: any(job['id'] == hls_id and job['status'] in ('done', 'error') for job in row.get('jobs', [])))
             hls_job = next(job for job in done['jobs'] if job['id'] == hls_id)
+            if hls_job['status'] != 'done':
+                with (OUT / 'hls-diagnostic.txt').open('w', encoding='utf-8') as diagnostic:
+                    subprocess.run([bin_dir / 'yt-dlp.exe', '--ignore-config', '--verbose', '--ffmpeg-location', bin_dir / 'ffmpeg.exe', '-f', 'bv*+mergeall[vcodec=none]/b', '--audio-multistreams', '--merge-output-format', 'mp4/mkv', '-P', str(output), '-o', 'diagnostic.%(ext)s', f'http://127.0.0.1:{server.server_port}/master.m3u8'], stdout=diagnostic, stderr=subprocess.STDOUT, timeout=90, env=env)
             assert hls_job['status'] == 'done', hls_job
             probe = json.loads(subprocess.check_output([bin_dir / 'ffprobe.exe', '-v', 'error', '-show_streams', '-show_format', '-of', 'json', hls_job['path']]))
             assert {'video', 'audio'} <= {row['codec_type'] for row in probe['streams']}
