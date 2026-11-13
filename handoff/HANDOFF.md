@@ -1,5 +1,17 @@
 # Viddow: установщик со встроенными инструментами
 
+## Windows-установщик подготовлен 14 ноября 2026
+
+Комплект `dist/Viddow-Windows-x64-test-3.5.0-test.1.zip`, внутри настоящий
+`Viddow-Setup-3.5.0-test.1-windows-x64.exe`, extension ZIP, инструкция,
+components.json, SHA256SUMS и журналы. [Отчёт](../docs/windows-test-installer-report.md).
+Код executable: 699f7dc, ветка build/windows-installer-test;
+[успешный CI](https://github.com/stoff7/viddow/actions/runs/43518987319).
+35 Windows-тестов прошли; installer install/MP4/HLS/repair/uninstall проверен
+на Windows Server 2025 x64. Реальные Chrome/Edge и Windows 11 пользователя
+ещё требуют приёмки. Полный macOS-пакет не делался. Публикации/релиза/merge нет.
+Ниже сохранён контекст до реализации; утверждения «реализации нет» исторические.
+
 Обновлено 14 ноября 2026. Новый запрос: пользователь не должен отдельно
 устанавливать Python, yt-dlp и ffmpeg. Следующей сессии начать с
 [bundled-installer.md](bundled-installer.md).

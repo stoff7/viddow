@@ -1,5 +1,12 @@
 # Кандидат: назначение Windows Job Object при создании процесса
 
+Для личного Windows-установщика 3.5.0-test.1 создан отдельный рабочий
+`windows_process.py` с pipes/env и неблокирующим wait. Исходные real-WinAPI
+сценарии повторены для него на Windows Server 2025 x64 в Actions и прошли.
+Это экспериментальная интеграция для проверки пользователем; Windows 11 и
+browser nested job ещё не приняты. См. [новый ADR](windows-bundled-installer.md)
+и [отчёт](../windows-test-installer-report.md). Прототип ниже сохранён отдельно.
+
 Статус: прототип, не принято для production до исполнения на Windows 11 x64.
 Дата: 12 ноября 2026. Реализация: `prototypes/windows_job.py`.
 
