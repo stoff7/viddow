@@ -67,7 +67,7 @@ def main():
         run([bin_dir / 'ffmpeg.exe', '-v', 'error', '-f', 'lavfi', '-i', 'testsrc=size=160x90:rate=10', '-f', 'lavfi', '-i', 'sine=frequency=440', '-t', '2', '-c:v', 'mpeg4', '-c:a', 'aac', root / 'sample.mp4'])
         run([bin_dir / 'ffmpeg.exe', '-v', 'error', '-i', root / 'sample.mp4', '-an', '-c:v', 'mpeg2video', '-f', 'hls', '-hls_time', '1', '-hls_playlist_type', 'vod', root / 'video.m3u8'])
         run([bin_dir / 'ffmpeg.exe', '-v', 'error', '-i', root / 'sample.mp4', '-vn', '-c:a', 'copy', '-f', 'hls', '-hls_time', '1', '-hls_playlist_type', 'vod', root / 'audio.m3u8'])
-        (root / 'master.m3u8').write_text('#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="Test",DEFAULT=YES,AUTOSELECT=YES,URI="audio.m3u8"\n#EXT-X-STREAM-INF:BANDWIDTH=300000,RESOLUTION=160x90,AUDIO="audio"\nvideo.m3u8\n', encoding='utf-8')
+        (root / 'master.m3u8').write_text('#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="Test",DEFAULT=YES,AUTOSELECT=YES,URI="audio.m3u8"\n#EXT-X-STREAM-INF:BANDWIDTH=300000,RESOLUTION=160x90,CODECS="mp4v.61,mp4a.40.2",AUDIO="audio"\nvideo.m3u8\n', encoding='utf-8')
         handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(root))
         server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), handler)
         threading.Thread(target=server.serve_forever, daemon=True).start()
