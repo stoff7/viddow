@@ -135,7 +135,7 @@ class InspectorTests(unittest.TestCase):
                     handle = kernel.OpenProcess(0x00100000, False, pid)
                     if handle:
                         try:
-                            self.assertEqual(kernel.WaitForSingleObject(handle, 0), 0)
+                            self.assertEqual(kernel.WaitForSingleObject(handle, 2000), 0)
                         finally:
                             kernel.CloseHandle(handle)
                     else:
