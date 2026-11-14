@@ -1,6 +1,8 @@
 """Bounded recommendation and first-frames preview; no queue or persistent storage."""
 import base64
 import os
+import math
+import re
 from platform_support import resolve_tool
 import tempfile
 import time
@@ -12,19 +14,27 @@ from trace_log import trace_event
 MAX_PREVIEW = 128 * 1024
 
 
+def video_codec_family(value):
+    codec = value.strip().lower() if isinstance(value, str) else ''
+    return 'h264' if re.fullmatch(r'(?:h\.?264|avc|avc[13](?:\.[0-9a-f]{6})?)', codec) else codec
+
+
 def recommended(result, ffmpeg=None):
     ffmpeg = bool(resolve_tool('ffmpeg')) if ffmpeg is None else ffmpeg
     formats = result['formats']
     audio = [row for row in formats if row['kind'] == 'audio']
+    if len(audio) > 1 and audio[0].get('audio_group') and all(row.get('audio_group') == audio[0]['audio_group'] for row in audio):
+        audio = [max(audio, key=lambda row: row.get('abr') or row.get('tbr') or 0)]
     main = [row for row in formats if row['kind'] != 'audio'] or audio
 
+    codecs = list(dict.fromkeys(video_codec_family(row.get('vcodec')) for row in main))
     def rank(row):
         sound = row['kind'] in ('combined', 'audio') or row['kind'] == 'video' and ffmpeg and len(audio) == 1
         video_class = 2 if row['kind'] in ('combined', 'video') else 1 if row['kind'] == 'unknown' else 0
         def number(key):
             value = row.get(key)
-            return value if type(value) in (int, float) and value > 0 else 0
-        return (video_class, bool(sound), number('height'), number('width'), number('tbr'), number('fps'))
+            return value if type(value) in (int, float) and math.isfinite(value) and value > 0 else 0
+        return (video_class, bool(sound), number('height'), number('fps') if number('fps') <= 240 else 0, -codecs.index(video_codec_family(row.get('vcodec'))), number('vbr') or (number('tbr') if row['kind'] == 'video' else number('abr') if row['kind'] == 'audio' else 0))
 
     best = max(main, key=rank)
     ids = [best['id']]

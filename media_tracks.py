@@ -21,7 +21,11 @@ def x_media_key(url):
 
 def probe_unknown(info, headers, cancel):
     rows = info.get('formats') or [info]
-    if len(rows) != 1 or (rows[0].get('vcodec') is not None and rows[0].get('acodec') is not None) or not valid_url(rows[0].get('url')):
+    if len(rows) != 1 or not valid_url(rows[0].get('url')):
+        return
+    row = rows[0]
+    known = row.get('vcodec') is not None and row.get('acodec') is not None
+    if known and (row.get('vcodec') == 'none' or download.number(row.get('vbr'))) and (row.get('acodec') == 'none' or download.number(row.get('abr'))):
         return
     executable = resolve_tool('ffprobe')
     if not executable:
@@ -46,15 +50,19 @@ def probe_unknown(info, headers, cancel):
             trace_event('probe_error')
             return
         row = rows[0]
-        row.update(vcodec=video.get('codec_name') if video else 'none', acodec=audio.get('codec_name') if audio else 'none')
+        if not known:
+            row.update(vcodec=video.get('codec_name') if video else 'none', acodec=audio.get('codec_name') if audio else 'none')
         if video:
+            bitrate = download.number(video.get('bit_rate'))
+            if bitrate and bitrate > 0 and not row.get('vbr'):
+                row['vbr'] = bitrate / 1000
             for key in ('width', 'height'):
                 if type(video.get(key)) is int:
                     row[key] = video[key]
         if audio:
             row['audio_channels'] = audio.get('channels')
             bitrate = download.number(audio.get('bit_rate'))
-            if bitrate:
+            if bitrate and bitrate > 0 and not row.get('abr'):
                 row['abr'] = bitrate / 1000
         trace_event('probe_done', video_count=int(bool(video)), audio_count=int(bool(audio)))
     except (OSError, RuntimeError, ValueError):
@@ -68,7 +76,7 @@ def probe_unknown(info, headers, cancel):
 def private_formats(info, headers):
     # Only downloader metadata is carried, never yt-dlp command/config fields.
     keys = ('format_id', 'url', 'manifest_url', 'protocol', 'ext', 'vcodec', 'acodec',
-        'width', 'height', 'fps', 'abr', 'tbr', 'language', 'audio_channels', 'format_note')
+        'width', 'height', 'fps', 'abr', 'vbr', 'tbr', 'language', 'audio_channels', 'format_note')
     return [{**{key: row[key] for key in keys if key in row},
              'http_headers': {**(info.get('http_headers') or {}), **(row.get('http_headers') or {}), **headers}}
             for row in info.get('formats') or [info] if valid_url(row.get('url'))]
@@ -98,22 +106,17 @@ def group_x_sources(sources):
             continue
         # X exposes bitrate variants of the original soundtrack. Languages and
         # channel layouts remain separate; no such inference is used elsewhere.
-        audio = {}
         layouts = {}
         for item in formats:
             if item['kind'] == 'audio' and item.get('audio_channels'):
                 layouts.setdefault(item.get('language'), set()).add(item['audio_channels'])
-        def audio_rank(item):
-            return download.number(item.get('abr')) or download.number(item.get('tbr')) or 0
         for item in formats:
             if item['kind'] == 'audio':
                 known = layouts.get(item.get('language'), set())
                 channels = item.get('audio_channels') or (next(iter(known)) if len(known) == 1 else None)
-                identity = (item.get('language'), channels)
-                old = audio.get(identity)
-                if old is None or audio_rank(item) > audio_rank(old):
-                    audio[identity] = item
-        formats = [item for item in formats if item['kind'] != 'audio' or item in audio.values()][:300]
+                identity = (item.get('language'), channels, item.get('acodec'))
+                item['audio_group'] = json.dumps([*key, *identity])
+        formats = formats[:300]
         allowed = {item['id'] for item in formats}
         routes = [row for row in routes if row['format_id'] in allowed]
         source = {**representative, 'result': {**representative['result'], 'formats': formats}}

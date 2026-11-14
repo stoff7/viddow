@@ -60,13 +60,16 @@ def normalize(info):
         kind = "audio" if video == "none" else "video" if audio == "none" and video else (
             "combined" if video and audio else "unknown")
         item = {"id": identifier, "kind": kind}
-        for key in ("ext", "width", "height", "fps", "vcodec", "acodec", "language", "audio_channels", "abr", "tbr", "filesize", "filesize_approx", "format_note"):
+        for key in ("ext", "width", "height", "fps", "vcodec", "acodec", "language", "audio_channels", "abr", "vbr", "tbr", "filesize", "filesize_approx", "format_note"):
             value = row.get(key)
             if isinstance(value, (str, int, float)) and not isinstance(value, bool):
                 if isinstance(value, str) or math.isfinite(value):
                     item[key] = value[:240] if isinstance(value, str) else value
         if "fps" in item and (not isinstance(item["fps"], (int, float)) or not 0 < item["fps"] <= 240):
             item.pop("fps")
+        for key in ('abr', 'vbr', 'tbr'):
+            if key in item and (type(item[key]) not in (int, float) or item[key] <= 0):
+                item.pop(key)
         formats.append(item)
         seen.add(identifier)
     if not formats:

@@ -42,7 +42,7 @@ test('defaults keep sound and never silently select one of several audio tracks'
 
 test('short labels keep unknown sound explicit and technical IDs in details', () => {
   assert.match(qualityLabel({ id: 'master1080', kind: 'unknown' }), /Качество неизвестно.*звук неизвестен/);
-  assert.equal(qualityLabel({ id: 'c', kind: 'combined', height: 720, ext: 'mp4' }), '720p · mp4 · со звуком');
+  assert.equal(qualityLabel({ id: 'c', kind: 'combined', height: 720, ext: 'mp4' }), '720p · битрейт не указан · mp4 · со звуком');
   assert.match(audioLabel({ kind: 'audio' }), /Язык не указан/);
   assert.match(audioLabel({ kind: 'audio', language: 'ru' }), /русский/);
 });
@@ -52,4 +52,29 @@ test('implausible frame rates do not appear in labels or dominate sorting', () =
   assert.equal(formatLabel(bad).includes('22500'), false);
   assert.equal(qualityLabel(bad).includes('22500'), false);
   assert.equal(mainFormats([bad, { ...bad, id: 'good', fps: 30 }])[0].id, 'good');
+});
+
+
+test('bitrate variants use one proven audio group and highest comparable video rate', () => {
+  const formats = [{id:'v1',kind:'video',height:720,vcodec:'h264',vbr:1000}, {id:'v2',kind:'video',height:720,vcodec:'h264',vbr:2400},
+    {id:'a1',kind:'audio',audio_group:'same',abr:32}, {id:'a2',kind:'audio',audio_group:'same',abr:128}];
+  assert.deepEqual(defaultChoice(formats, true), {main:'v2',audio:['a2']});
+  assert.match(qualityLabel(formats[1]), /2,4 Мбит/);
+  assert.match(audioLabel(formats[3]), /128 кбит/);
+  assert.deepEqual(defaultChoice(formats.map(row => ({...row,audio_group:undefined})), true).audio, []);
+  assert.match(qualityLabel({kind:'combined', tbr:2500}), /всего/);
+  assert.match(qualityLabel({kind:'video', vbr:Infinity, tbr:-1}), /не указан/);
+});
+
+
+test('H.264 and RFC AVC names rank by bitrate in either source order', () => {
+  for (const alias of ['h264', 'h.264', 'AVC', 'avc1', 'avc1.640032', 'avc3.640032']) {
+    const low = {id:'low', kind:'video', height:1080, fps:30, vcodec:'h.264', vbr:2920};
+    const high = {...low, id:'high', vcodec:alias, vbr:5360};
+    const audio = {id:'audio',kind:'audio',abr:128};
+    for (const rows of [[low, high, audio], [high, low, audio]]) {
+      assert.equal(defaultChoice(rows, true).main, 'high');
+      assert.equal(mainFormats(rows)[0].id, 'high');
+    }
+  }
 });

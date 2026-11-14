@@ -22,7 +22,7 @@ export class MediaCards {
     quality.id = id;
     const qualityLabelNode = node('label', '', 'Качество'); qualityLabelNode.htmlFor = id;
     const qualityField = node('div', ''); qualityField.append(qualityLabelNode, quality);
-    const audio = node('details', 'media-audio'), audioSummary = node('summary', '', 'Озвучка');
+    const audio = node('details', 'media-audio'), audioSummary = node('summary', '', 'Звук');
     const audioFields = node('fieldset', ''); audioFields.append(node('legend', 'visually-hidden', 'Звуковые дорожки'));
     audio.append(audioSummary, audioFields); formats.append(qualityField, audio);
     const status = node('p', 'media-status'), progress = node('progress', ''); progress.max = 1;
@@ -120,7 +120,7 @@ export class MediaCards {
     card.audio.hidden = choice.main?.kind !== 'video';
     card.audioSummary.textContent = choice.silent ? 'Без звука' : choice.audio.length === 1
       ? audioLabel(row.result.formats.find(format => format.id === choice.audio[0]))
-      : choice.audio.length ? `Озвучка · ${choice.audio.length}` : 'Выбрать озвучку';
+      : choice.audio.length ? `Звук · ${choice.audio.length}` : 'Выбрать звук';
     const problem = row.result ? choiceProblem(choice.main, choice.audio, context.ffmpeg, choice.silent) : '';
     card.principal = row.jobs.findLast(job => ACTIVE.has(job.status)) || row.jobs.findLast(job => job.status === 'done') || row.jobs.at(-1);
     const job = card.principal;

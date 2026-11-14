@@ -43,11 +43,11 @@ class MediaTracksTests(unittest.TestCase):
         grouped = group_x_sources(original)
         self.assertEqual(len(grouped), 2)
         chosen = next(row for row in grouped if '/123/' in row['url'])
-        self.assertEqual([row['kind'] for row in chosen['result']['formats']], ['video', 'audio'])
+        self.assertEqual([row['kind'] for row in chosen['result']['formats']], ['video', 'audio', 'audio'])
         self.assertEqual(len(recommended(chosen['result'], ffmpeg=True)[1]), 2)
         routes = chosen['download_info']['formats']
         self.assertTrue(all('/123/' in row['url'] and '?secret=full' in row['url'] for row in routes))
-        self.assertEqual(routes[1]['http_headers'], {'X-Track': 'audio128'})
+        self.assertEqual(routes[2]['http_headers'], {'X-Track': 'audio128'})
         self.assertEqual(chosen['preview_context']['headers'], {'X-Track': 'video0'})
         self.assertNotIn('secret', json.dumps(chosen['result']))
 
@@ -57,6 +57,34 @@ class MediaTracksTests(unittest.TestCase):
         other = source('123', 'audio', 128)
         other['url'] = other['url'].replace('video.twimg.com', 'video.twimg.com.evil')
         self.assertEqual(len(group_x_sources([source('123', 'video'), other])), 2)
+
+    def test_bitrate_probe_enriches_known_stream_and_keeps_metadata(self):
+        info = {'formats': [{'format_id': 'v', 'url': 'https://cdn.test/v', 'vcodec': 'h264', 'acodec': 'none'}]}
+        def run(command, receive, stop, **limits):
+            receive(json.dumps({'streams': [{'codec_type': 'video', 'codec_name': 'h264', 'bit_rate': '2400000'}]}))
+        with patch('media_tracks.resolve_tool', return_value='ffprobe'), patch('media_tracks.download.run_tool', side_effect=run) as probe:
+            probe_unknown(info, {}, threading.Event())
+            self.assertEqual(normalize(info)['formats'][0]['vbr'], 2400)
+            probe_unknown(info, {}, threading.Event())
+            self.assertEqual(probe.call_count, 1)
+
+    def test_recommendation_uses_fps_then_video_bitrate_and_one_audio_variant(self):
+        rows = [{'id': 'v1', 'kind': 'video', 'height': 720, 'fps': 30, 'vcodec': 'h264', 'vbr': 1000},
+                {'id': 'v2', 'kind': 'video', 'height': 720, 'fps': 30, 'vcodec': 'h264', 'vbr': 2400},
+                {'id': 'a1', 'kind': 'audio', 'abr': 32, 'audio_group': 'same'},
+                {'id': 'a2', 'kind': 'audio', 'abr': 128, 'audio_group': 'same'}]
+        self.assertEqual(recommended({'formats': rows}, ffmpeg=True)[1], ['v2', 'a2'])
+        rows[0]['fps'] = 60
+        self.assertEqual(recommended({'formats': rows}, ffmpeg=True)[1], ['v1', 'a2'])
+        self.assertNotIn('vbr', normalize({'formats': [{'format_id': 'v', 'vcodec': 'h264', 'acodec': 'none', 'vbr': -1}]})['formats'][0])
+
+    def test_avc_aliases_rank_by_bitrate_in_either_order(self):
+        for alias in ('h264', 'h.264', 'AVC', 'avc1', 'avc1.640032', 'avc3.640032'):
+            low = dict(id='low', kind='video', height=1080, fps=30, vcodec='h.264', vbr=2920)
+            high = dict(low, id='high', vcodec=alias, vbr=5360)
+            audio = dict(id='audio', kind='audio', abr=128)
+            for rows in ([low, high, audio], [high, low, audio]):
+                self.assertEqual(recommended({'formats': rows}, ffmpeg=True)[1], ['high', 'audio'])
 
     def test_inspector_publishes_one_video_and_freezes_selected_private_info(self):
         sources = [source('123', 'video'), source('123', 'audio', 128)]
