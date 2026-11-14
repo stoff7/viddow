@@ -14,3 +14,13 @@ H.264/AVC при сравнении. h.264, h264, avc1.640032 и avc3 относ
 11/Chrome/Edge и источника X остаётся отдельной от локальных/CI fixtures.
 
 Локальные проверки: Python 129 всего, 122 passed / 7 OS skips; Node 60/60 PASS.
+
+Итоговая сборка: ae19db9081e495a6dc38d751d1cd9e1cf2665f60.
+CI: https://github.com/stoff7/viddow/actions/runs/43605936945 — SUCCESS.
+Windows: 60 passed / 1 skipped; Node 60/60. Установочный smoke PASS: MP4, HLS
+video/audio + mux, framing/EOF, busy replacement, repair/corruption/uninstall.
+Все исходные CI SHA256SUMS сверены после скачивания.
+EXE SHA-256: 5c5057c0ec74cd999c1b5d05fd7e65d147c0d808476b423809968b29826a1260.
+Два ранних прогона выявили зависимости тестов от ffmpeg и POSIX-проверки PID;
+исправлены заглушки и ожидание сигнала Windows-процесса, проверки не отключались.
+Релиз v3.5.0-test.3 публикуется как prerelease.
