@@ -123,8 +123,26 @@ class InspectorTests(unittest.TestCase):
                     inspect_source('https://example.com/watch', {}, cancel, timeout=.15)
             self.assertLess(time.monotonic() - start, 3)
             for pid in pids:
-                with self.assertRaises(ProcessLookupError):
-                    os.kill(pid, 0)
+                if os.name == 'nt':
+                    import ctypes
+                    from ctypes import wintypes
+                    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+                    kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+                    kernel.OpenProcess.restype = wintypes.HANDLE
+                    kernel.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+                    kernel.WaitForSingleObject.restype = wintypes.DWORD
+                    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+                    handle = kernel.OpenProcess(0x00100000, False, pid)
+                    if handle:
+                        try:
+                            self.assertEqual(kernel.WaitForSingleObject(handle, 0), 0)
+                        finally:
+                            kernel.CloseHandle(handle)
+                    else:
+                        self.assertEqual(ctypes.get_last_error(), 87)
+                else:
+                    with self.assertRaises(ProcessLookupError):
+                        os.kill(pid, 0)
 
     def test_analysis_failure_does_not_block_queue_or_native_commands(self):
         with tempfile.TemporaryDirectory() as folder:

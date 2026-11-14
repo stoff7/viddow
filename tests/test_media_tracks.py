@@ -86,7 +86,8 @@ class MediaTracksTests(unittest.TestCase):
             for rows in ([low, high, audio], [high, low, audio]):
                 self.assertEqual(recommended({'formats': rows}, ffmpeg=True)[1], ['high', 'audio'])
 
-    def test_inspector_publishes_one_video_and_freezes_selected_private_info(self):
+    @patch('media_prepare.resolve_tool', return_value='ffmpeg')
+    def test_inspector_publishes_one_video_and_freezes_selected_private_info(self, tool):
         sources = [source('123', 'video'), source('123', 'audio', 128)]
         def inspect(url, options, cancel):
             row = next(row for row in sources if row['url'] == url)
